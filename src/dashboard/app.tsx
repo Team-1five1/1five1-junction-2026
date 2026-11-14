@@ -110,6 +110,219 @@ interface SubmissionItem {
   }>;
 }
 
+function SwarmTopologyGraph({ swarm }: { swarm: any }) {
+  const nodes: Array<{
+    id: string;
+    label: string;
+    ip: string;
+    country: string;
+    rating: number | null;
+    role?: "ORIGINATOR" | "AMPLIFIER" | "COORDINATED_NODE";
+  }> = Array.isArray(swarm?.graphNodes) ? swarm.graphNodes : [];
+  const edges: Array<{ source: string; target: string; weight: number; reason: string }> = Array.isArray(
+    swarm?.graphEdges
+  )
+    ? swarm.graphEdges
+    : [];
+
+  if (nodes.length === 0) return null;
+
+  const width = 600;
+  const height = 260;
+  const cx = width / 2;
+  const cy = height / 2;
+
+  const originators = nodes.filter((n) => n.role === "ORIGINATOR");
+  const satellites = nodes.filter((n) => n.role !== "ORIGINATOR");
+
+  const posMap = new Map<
+    string,
+    { x: number; y: number; node: (typeof nodes)[number] }
+  >();
+
+  if (originators.length === 1) {
+    posMap.set(originators[0]!.id, { x: cx, y: cy, node: originators[0]! });
+  } else if (originators.length > 1) {
+    originators.forEach((n, idx) => {
+      const angle = (2 * Math.PI * idx) / originators.length - Math.PI / 2;
+      posMap.set(n.id, {
+        x: cx + Math.cos(angle) * 44,
+        y: cy + Math.sin(angle) * 32,
+        node: n,
+      });
+    });
+  }
+
+  const ringList = originators.length > 0 ? satellites : nodes;
+  const rx = originators.length > 0 ? 210 : 195;
+  const ry = originators.length > 0 ? 76 : 74;
+  ringList.forEach((n, idx) => {
+    const angle = (2 * Math.PI * idx) / Math.max(1, ringList.length) - Math.PI / 2;
+    posMap.set(n.id, {
+      x: cx + Math.cos(angle) * rx,
+      y: cy + Math.sin(angle) * ry,
+      node: n,
+    });
+  });
+
+  const showEdgeLabels = edges.length <= 15;
+
+  return (
+    <div className="mb-3 space-y-2">
+      <div className="rounded-lg border border-border/70 bg-secondary/10 p-2 overflow-hidden">
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          className="w-full h-56 select-none"
+          role="img"
+          aria-label={`Swarm topology graph for ${swarm.name || swarm.id}`}
+        >
+          {/* Coordination Edges */}
+          <g>
+            {edges.map((edge, idx) => {
+              const src = posMap.get(edge.source);
+              const dst = posMap.get(edge.target);
+              if (!src || !dst) return null;
+              const strokeWidth = Math.max(1.2, Math.min(4.2, edge.weight * 4.5));
+              const strokeColor =
+                edge.weight >= 0.7 ? "#f43f5e" : edge.weight >= 0.55 ? "#f59e0b" : "#64748b";
+              const mx = (src.x + dst.x) / 2;
+              const my = (src.y + dst.y) / 2;
+              return (
+                <g key={`${edge.source}-${edge.target}-${idx}`}>
+                  <line
+                    x1={src.x}
+                    y1={src.y}
+                    x2={dst.x}
+                    y2={dst.y}
+                    stroke={strokeColor}
+                    strokeOpacity={0.65}
+                    strokeWidth={strokeWidth}
+                    strokeDasharray={edge.weight >= 0.7 ? undefined : "4 3"}
+                  >
+                    <title>{`${edge.source} <-> ${edge.target}: ${edge.reason} (${Math.round(edge.weight * 100)}%)`}</title>
+                  </line>
+                  {showEdgeLabels && (
+                    <g transform={`translate(${mx}, ${my})`}>
+                      <rect
+                        x={-14}
+                        y={-8}
+                        width={28}
+                        height={15}
+                        rx={4}
+                        fill="#0f172a"
+                        fillOpacity={0.82}
+                        stroke={strokeColor}
+                        strokeOpacity={0.6}
+                        strokeWidth={0.8}
+                      />
+                      <text
+                        x={0}
+                        y={3}
+                        textAnchor="middle"
+                        fill="#f8fafc"
+                        fontSize={8.5}
+                        fontFamily="monospace"
+                        fontWeight="600"
+                      >
+                        {Math.round(edge.weight * 100)}%
+                      </text>
+                    </g>
+                  )}
+                </g>
+              );
+            })}
+          </g>
+
+          {/* Swarm Account Nodes */}
+          <g>
+            {nodes.map((node) => {
+              const pos = posMap.get(node.id);
+              if (!pos) return null;
+              const isOriginator = node.role === "ORIGINATOR";
+              const isAmplifier = node.role === "AMPLIFIER";
+              const fill = isOriginator ? "#f43f5e" : isAmplifier ? "#f59e0b" : "#38bdf8";
+              const stroke = isOriginator ? "#fda4af" : isAmplifier ? "#fde68a" : "#bae6fd";
+              const radius = isOriginator ? 16 : 12;
+              const roleCode = isOriginator ? "ORG" : isAmplifier ? "AMP" : "NOD";
+              const labelY = pos.y < 52 ? pos.y + radius + 12 : pos.y + radius + 12;
+              const shortLabel = (node.label || node.id).replace(/^seed_demo_/, "").slice(0, 16);
+              return (
+                <g key={node.id} className="cursor-pointer">
+                  <title>{`${node.label} (${node.role || "COORDINATED_NODE"})\nIP: ${node.ip} (${node.country})${node.rating !== null && node.rating !== undefined ? `\nRating: ${node.rating}★` : ""}`}</title>
+                  {isOriginator && (
+                    <circle
+                      cx={pos.x}
+                      cy={pos.y}
+                      r={radius + 6}
+                      fill="none"
+                      stroke="#f43f5e"
+                      strokeOpacity={0.45}
+                      strokeWidth={1.6}
+                      className="animate-pulse"
+                    />
+                  )}
+                  <circle
+                    cx={pos.x}
+                    cy={pos.y}
+                    r={radius}
+                    fill={fill}
+                    stroke={stroke}
+                    strokeWidth={2}
+                  />
+                  <text
+                    x={pos.x}
+                    y={pos.y + 3}
+                    textAnchor="middle"
+                    fill="#ffffff"
+                    fontSize={isOriginator ? 8.5 : 7.5}
+                    fontFamily="monospace"
+                    fontWeight="700"
+                  >
+                    {roleCode}
+                  </text>
+                  <text
+                    x={pos.x}
+                    y={labelY}
+                    textAnchor="middle"
+                    fill="currentColor"
+                    fontSize={9.5}
+                    className="text-foreground font-mono font-semibold"
+                  >
+                    {shortLabel}
+                  </text>
+                  <text
+                    x={pos.x}
+                    y={labelY + 10}
+                    textAnchor="middle"
+                    fontSize={8}
+                    className="fill-muted-foreground font-mono"
+                  >
+                    {node.ip}
+                  </text>
+                </g>
+              );
+            })}
+          </g>
+        </svg>
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: "#f43f5e" }} /> Originator (ORG)
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: "#f59e0b" }} /> Amplifier (AMP)
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: "#38bdf8" }} /> Coordinated Node (NOD)
+          </span>
+        </div>
+        <span className="font-mono text-[10px]">Hover nodes &amp; edges for evidence details</span>
+      </div>
+    </div>
+  );
+}
+
 export function DashboardApp() {
   const [darkMode, setDarkMode] = useState(true);
   const [activeTab, setActiveTab] = useState<"overview" | "map" | "bots" | "search" | "swarms" | "traffic">("overview");
@@ -127,6 +340,12 @@ export function DashboardApp() {
   const [trafficNotice, setTrafficNotice] = useState<string>("");
   const [socialDatasetInput, setSocialDatasetInput] = useState<string>("");
   const [swarmNotice, setSwarmNotice] = useState<string>("");
+  const [quarantinedSwarmIds, setQuarantinedSwarmIds] = useState<Record<string, boolean>>({});
+  const [quarantiningSwarmId, setQuarantiningSwarmId] = useState<string | null>(null);
+  const [botDnsResults, setBotDnsResults] = useState<
+    Record<string, { verified: boolean; method: string; hostname?: string | null; verdict: string }>
+  >({});
+  const [verifyingBotIp, setVerifyingBotIp] = useState<string | null>(null);
 
   // Regional Scanner state
   const [selectedRegion, setSelectedRegion] = useState<string>("all");
@@ -1832,7 +2051,29 @@ export function DashboardApp() {
                             <div className="rounded-lg border border-border p-3 bg-secondary/10">
                               <div className="text-muted-foreground font-semibold">Amplification Chain</div>
                               <div className="mt-1 font-mono font-bold text-foreground">
-                                Originator: {swarm.amplificationMetrics.originatorSession.slice(0, 12)} &bull; {swarm.amplificationMetrics.amplifierCount} Amplifier(s)
+                                {swarm.amplificationMetrics.originatorHandles && swarm.amplificationMetrics.originatorHandles.length > 1 ? (
+                                  <>
+                                    Originators ({swarm.amplificationMetrics.originatorHandles.length}):{" "}
+                                    <span className="text-destructive font-semibold">
+                                      @{swarm.amplificationMetrics.originatorHandles.join(", @")}
+                                    </span>
+                                  </>
+                                ) : swarm.amplificationMetrics.originatorHandle ? (
+                                  <>
+                                    Originator:{" "}
+                                    <span className="text-destructive font-semibold">
+                                      @{swarm.amplificationMetrics.originatorHandle}
+                                    </span>
+                                  </>
+                                ) : (
+                                  <>
+                                    Originator:{" "}
+                                    <span className="text-destructive font-semibold">
+                                      {swarm.amplificationMetrics.originatorSession.replace(/^seed_demo_/, "").slice(0, 16)}
+                                    </span>
+                                  </>
+                                )}{" "}
+                                &bull; {swarm.amplificationMetrics.amplifierCount} Amplifier(s)
                               </div>
                               <div className="mt-0.5 text-muted-foreground truncate">
                                 {swarm.amplificationMetrics.sharedUrlsOrCodes?.length > 0
@@ -1931,6 +2172,7 @@ export function DashboardApp() {
                             Connected by shared subnet (/24), synchronized timing bursts, and text similarity
                           </span>
                         </div>
+                        <SwarmTopologyGraph swarm={swarm} />
                         <div className="flex flex-wrap items-center gap-2">
                           {swarm.graphNodes.map((node: any) => (
                             <div
@@ -1990,16 +2232,56 @@ export function DashboardApp() {
                       )}
 
                       {/* Actionable Defense Box */}
-                      <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 flex items-center justify-between text-xs">
+                      <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 flex flex-wrap items-center justify-between gap-3 text-xs">
                         <div className="flex items-center gap-2">
                           <IconShield className="h-4 w-4 text-primary shrink-0" />
                           <span className="text-foreground font-medium">
                             <strong>Recommended Defense Action:</strong> {swarm.recommendedAction}
                           </span>
                         </div>
-                        <Badge variant="default" className="text-xs shrink-0">
-                          Action Ready
-                        </Badge>
+                        <button
+                          type="button"
+                          disabled={quarantiningSwarmId === swarm.id || Boolean(quarantinedSwarmIds[swarm.id])}
+                          onClick={async () => {
+                            setQuarantiningSwarmId(swarm.id);
+                            try {
+                              const res = await fetch("/api/dashboard/swarms/quarantine", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                  swarmId: swarm.id,
+                                  memberSessions: (swarm.members || []).map((m: any) => m.sessionHash),
+                                  ips: (swarm.members || []).map((m: any) => m.ipAddress),
+                                }),
+                              });
+                              if (res.ok) {
+                                const data = await res.json();
+                                if (data.swarmsReport) setSwarmsData(data.swarmsReport);
+                                if (data.trafficReport) setTrafficData(data.trafficReport);
+                                setQuarantinedSwarmIds((prev) => ({ ...prev, [swarm.id]: true }));
+                                setSwarmNotice(
+                                  `Quarantined swarm ${swarm.id}: shadow-held ${data.quarantinedMembersCount ?? 0} account(s) and added ${(data.blockedIps || []).length} IP(s) to WAF block rules.`
+                                );
+                                setTimeout(() => setSwarmNotice(""), 6000);
+                              } else {
+                                setSwarmNotice("Could not quarantine swarm. Refresh and try again.");
+                              }
+                            } finally {
+                              setQuarantiningSwarmId(null);
+                            }
+                          }}
+                          className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold shrink-0 transition-colors cursor-pointer ${
+                            quarantinedSwarmIds[swarm.id]
+                              ? "border border-success/40 bg-success/10 text-success cursor-default"
+                              : "bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                          }`}
+                        >
+                          {quarantinedSwarmIds[swarm.id]
+                            ? "✓ Swarm Quarantined & IPs Blocked"
+                            : quarantiningSwarmId === swarm.id
+                            ? "Quarantining..."
+                            : "🛡️ Quarantine Swarm & Block IPs"}
+                        </button>
                       </div>
                     </CardContent>
                   </Card>
@@ -2553,18 +2835,75 @@ export function DashboardApp() {
                               {threat.totalRequests}
                             </TableCell>
                             <TableCell>
-                              <Badge
-                                variant={
-                                  threat.recommendedAction === "BLOCK"
-                                    ? "destructive"
-                                    : threat.recommendedAction === "RATE_LIMIT"
-                                    ? "warning"
-                                    : "secondary"
-                                }
-                                className="text-[10px]"
-                              >
-                                {threat.recommendedAction}
-                              </Badge>
+                              <div className="flex flex-col items-start gap-1.5">
+                                <Badge
+                                  variant={
+                                    threat.recommendedAction === "BLOCK"
+                                      ? "destructive"
+                                      : threat.recommendedAction === "RATE_LIMIT"
+                                      ? "warning"
+                                      : "secondary"
+                                  }
+                                  className="text-[10px]"
+                                >
+                                  {threat.recommendedAction}
+                                </Badge>
+                                {(threat.claimedBotName ||
+                                  threat.category === "SPOOFED_BOT" ||
+                                  threat.category === "VERIFIED_BOT") && (
+                                  botDnsResults[threat.ipAddress] ? (
+                                    <Badge
+                                      variant={
+                                        botDnsResults[threat.ipAddress]!.verified
+                                          ? "outline"
+                                          : "destructive"
+                                      }
+                                      className="text-[9px] font-mono"
+                                      title={
+                                        botDnsResults[threat.ipAddress]!.hostname ||
+                                        botDnsResults[threat.ipAddress]!.verdict
+                                      }
+                                    >
+                                      {botDnsResults[threat.ipAddress]!.verified
+                                        ? `✓ Verified (${botDnsResults[threat.ipAddress]!.method})`
+                                        : `✗ Spoofed (${botDnsResults[threat.ipAddress]!.method})`}
+                                    </Badge>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      disabled={verifyingBotIp === threat.ipAddress}
+                                      onClick={async () => {
+                                        setVerifyingBotIp(threat.ipAddress);
+                                        try {
+                                          const res = await fetch("/api/dashboard/traffic/verify-bot", {
+                                            method: "POST",
+                                            headers: { "Content-Type": "application/json" },
+                                            body: JSON.stringify({
+                                              ipAddress: threat.ipAddress,
+                                              claimedBotName: threat.claimedBotName || "Googlebot",
+                                              asnLabel: threat.asnLabel || "",
+                                            }),
+                                          });
+                                          if (res.ok) {
+                                            const data = await res.json();
+                                            setBotDnsResults((prev) => ({
+                                              ...prev,
+                                              [threat.ipAddress]: data,
+                                            }));
+                                          }
+                                        } finally {
+                                          setVerifyingBotIp(null);
+                                        }
+                                      }}
+                                      className="inline-flex items-center gap-1 rounded border border-border bg-secondary/60 px-2 py-0.5 text-[10px] font-semibold hover:bg-secondary cursor-pointer"
+                                    >
+                                      {verifyingBotIp === threat.ipAddress
+                                        ? "Checking..."
+                                        : "🔍 Verify FCrDNS"}
+                                    </button>
+                                  )
+                                )}
+                              </div>
                             </TableCell>
                           </TableRow>
                         ))

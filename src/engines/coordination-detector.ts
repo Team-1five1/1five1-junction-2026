@@ -78,6 +78,9 @@ export interface SwarmCluster {
   };
   amplificationMetrics: {
     originatorSession: string;
+    originatorHandle?: string | null;
+    originatorSessions?: string[];
+    originatorHandles?: string[];
     amplifierCount: number;
     amplificationVelocityPerMin: number;
     sharedUrlsOrCodes: string[];
@@ -276,12 +279,6 @@ function extractAmplificationTokens(text: string, sharedUrl?: string): string[] 
   let match: RegExpExecArray | null;
   while ((match = explicitCodeRegex.exec(text)) !== null) {
     if (match[1]) tokens.add(`code:${match[1].toUpperCase()}`);
-  }
-
-  const alphanumCodeMatches =
-    text.match(/\b(?=[A-Z0-9]{4,16}\b)(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]+\b/g) || [];
-  for (const code of alphanumCodeMatches) {
-    tokens.add(`code:${code}`);
   }
 
   return Array.from(tokens);
@@ -756,12 +753,21 @@ export function detectCoordinatedSwarms(
         completionDiff < 150 &&
         mA.telemetrySummary.avgFlightVariance < 5);
 
+    const hasRecordedVariance =
+      (mA.telemetrySummary.avgFlightVariance > 0 || mA.telemetrySummary.avgCompletionTimeMs > 0) &&
+      (mB.telemetrySummary.avgFlightVariance > 0 || mB.telemetrySummary.avgCompletionTimeMs > 0);
+    const hasContextualBotLink =
+      sharedSubnet || sharedDeviceFp || timeDeltaSec <= 300 || maxSim >= 0.35 || sharedUrlOrCode;
+
     const telemetryColocation =
-      (mA.telemetrySummary.botdDetectedCount > 0 &&
+      hasContextualBotLink &&
+      (((mA.telemetrySummary.botdDetectedCount > 0 &&
         mB.telemetrySummary.botdDetectedCount > 0) ||
-      (mA.telemetrySummary.webdriverCount > 0 &&
-        mB.telemetrySummary.webdriverCount > 0) ||
-      (varianceDiff < 3 && mA.telemetrySummary.avgFlightVariance < 5);
+        (mA.telemetrySummary.webdriverCount > 0 &&
+          mB.telemetrySummary.webdriverCount > 0)) ||
+        (hasRecordedVariance &&
+          varianceDiff < 3 &&
+          mA.telemetrySummary.avgFlightVariance < 5));
 
     // Weight accumulator
     let weight = 0;
@@ -779,7 +785,12 @@ export function detectCoordinatedSwarms(
     else if (maxSim >= 0.25) weight += 0.15;
 
     if (coTargetCount >= 2) weight += 0.35;
-    else if (coTargetCount === 1) weight += 0.15;
+    else if (
+      coTargetCount === 1 &&
+      (timeDeltaSec <= 1800 || coActivityWindows >= 1 || sharedSubnet || sharedUrlOrCode)
+    ) {
+      weight += 0.15;
+    }
 
     if (telemetryColocation) weight += 0.2;
     if (sharedUrlOrCode) weight += 0.35;
@@ -963,6 +974,28 @@ export function detectCoordinatedSwarms(
       const subs = sessionMap.get(sm.sessionHash) || [];
       clusterSubmissions.push(...subs);
     }
+
+    // False-positive guard: pairs of size 2 without any bot telemetry, shared subnet,
+    // reply chain, or campaign link are coincidental human shoppers, not an inauthentic swarm.
+
+    const memberSet = new Set(component);
+    const clusterLinks = activeLinks.filter(
+      (l) => memberSet.has(l.sourceSession) && memberSet.has(l.targetSession)
+    );
+    const clusterSubnets = new Set(swarmMembers.map((m) => m.subnet24));
+    const hasBotOrCampaignSignal =
+      clusterSubnets.size === 1 ||
+      clusterLinks.some((l) => l.sharedSignals.sharedUrlOrCode || l.sharedSignals.crossSubnetFingerprintMatch) ||
+      clusterSubmissions.some(
+        (s) =>
+          s.authorType === "bot" ||
+          (s.telemetry as any)?.webdriver ||
+          (s.telemetry as any)?.botdDetected
+      );
+
+    if (component.length < 3 && !hasBotOrCampaignSignal) {
+      continue;
+    }
     clusterSubmissions.sort(
       (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
     );
@@ -1140,10 +1173,7 @@ export function detectCoordinatedSwarms(
       }
     }
 
-    const memberSet = new Set(component);
-    const clusterLinks = activeLinks.filter(
-      (l) => memberSet.has(l.sourceSession) && memberSet.has(l.targetSession)
-    );
+
 
     const hasAmplificationPattern =
       sharedUrlsOrCodes.length > 0 ||
@@ -1151,19 +1181,48 @@ export function detectCoordinatedSwarms(
       avgPairwiseSim >= 0.45;
 
     let amplifierCount = 0;
-    const originatorSession = swarmMembers[0]!.sessionHash;
     if (hasAmplificationPattern) {
-      swarmMembers[0]!.role = "ORIGINATOR";
+      // Swarm campaigns can feature multiple co-originators (e.g. 2+ seed accounts
+      // kicking off coordinated posts across distinct entities/threads or dropping seed links).
+      const originatedEntities = new Set<string>();
+      if (swarmMembers[0]) {
+        swarmMembers[0]!.role = "ORIGINATOR";
+        for (const cs of clusterSubmissions.filter((s) => s.authorSessionHash === swarmMembers[0]!.sessionHash)) {
+          originatedEntities.add(cs.entityId);
+        }
+      }
+
       for (let idx = 1; idx < swarmMembers.length; idx++) {
         const sm = swarmMembers[idx]!;
         const meta = metaBySession.get(sm.sessionHash)!;
-        const echoesToken = Array.from(meta.tokens).some((t) =>
-          sharedUrlsOrCodes.includes(t)
+        const mySubs = clusterSubmissions.filter((s) => s.authorSessionHash === sm.sessionHash);
+        const myCommentIds = new Set(mySubs.map((s) => s.wpCommentId));
+
+        // Did other cluster members reply to this account's comments?
+        const hasChildrenInCluster = clusterSubmissions.some(
+          (cs) => typeof cs.replyToCommentId === "number" && myCommentIds.has(cs.replyToCommentId)
         );
+
+        // Does this member reply to anyone in the cluster?
         const repliesInCluster = Array.from(meta.replyTargets).some((rid) =>
           clusterCommentIds.has(rid)
         );
-        if (echoesToken || repliesInCluster || avgPairwiseSim >= 0.45) {
+
+        const touchesNewEntity = mySubs.some((s) => !originatedEntities.has(s.entityId));
+        const echoesToken = Array.from(meta.tokens).some((t) =>
+          sharedUrlsOrCodes.includes(t)
+        );
+
+        // An account is a Co-Originator if it is a root post (does NOT reply to another cluster member)
+        // AND either has other members replying to it, OR co-seeds a distinct product/entity with the promo/attack token.
+        const isCoOriginator =
+          !repliesInCluster &&
+          (hasChildrenInCluster || (touchesNewEntity && echoesToken));
+
+        if (isCoOriginator) {
+          sm.role = "ORIGINATOR";
+          for (const s of mySubs) originatedEntities.add(s.entityId);
+        } else if (echoesToken || repliesInCluster || avgPairwiseSim >= 0.45) {
           sm.role = "AMPLIFIER";
           amplifierCount++;
         } else {
@@ -1173,6 +1232,16 @@ export function detectCoordinatedSwarms(
     } else {
       for (const sm of swarmMembers) sm.role = "COORDINATED_NODE";
     }
+
+    const originators = swarmMembers.filter((sm) => sm.role === "ORIGINATOR");
+    if (originators.length === 0 && swarmMembers.length > 0) {
+      swarmMembers[0]!.role = "ORIGINATOR";
+      originators.push(swarmMembers[0]!);
+    }
+    const originatorSession = originators[0]!.sessionHash;
+    const originatorHandle = originators[0]!.authorHandle || null;
+    const originatorSessions = originators.map((o) => o.sessionHash);
+    const originatorHandles = originators.map((o) => o.authorHandle).filter(Boolean) as string[];
 
     const amplificationVelocityPerMin = Number(
       (amplifierCount / Math.max(0.1, timeSpanMinutes)).toFixed(2)
@@ -1264,7 +1333,9 @@ export function detectCoordinatedSwarms(
 
     const graphNodes = swarmMembers.map((sm) => ({
       id: sm.sessionHash,
-      label: sm.authorHandle || sm.sessionHash.slice(0, 10),
+      label: sm.authorHandle
+        ? `@${sm.authorHandle}`
+        : sm.sessionHash.replace(/^seed_demo_/, "").slice(0, 14),
       ip: sm.ipAddress,
       country: sm.countryCode,
       rating: sm.ratings[0] ?? null,
@@ -1324,6 +1395,9 @@ export function detectCoordinatedSwarms(
       },
       amplificationMetrics: {
         originatorSession,
+        originatorHandle,
+        originatorSessions,
+        originatorHandles,
         amplifierCount,
         amplificationVelocityPerMin,
         sharedUrlsOrCodes,
@@ -1591,29 +1665,56 @@ export function parseSocialDataset(rawContent: string): RawSubmissionInput[] {
 }
 
 /**
- * Generates a realistic multi-platform social campaign CSV dataset
- * combining an 8-account astroturf + reply-amplification ring across rotating subnets
- * with 10 organic community participants.
+ * Generates a realistic multi-platform social & web-shop discussion CSV dataset
+ * combining two coordinated rings (an 8-account crypto/promo amplification ring and a
+ * 6-account competitor review-bomb brigade) alongside 22 organic community shoppers.
  */
 export function generateSampleSocialDatasetCsv(): string {
   const now = Date.now();
   const iso = (offsetMs: number) => new Date(now + offsetMs).toISOString();
   const acctSync = iso(-1800_000);
+  const acctSync2 = iso(-5400_000);
   const rows = [
     "id,author,session,entity_id,timestamp,reply_to,url,ip,account_created_at,fingerprint,rating,text",
-    `tw_101,promo_node_01,soc_bot_01,launch_thread,${iso(-900_000)},,https://fast-airdrop-promo.xyz,45.155.205.11,${acctSync},fp_win11_sync_88,5,"Huge breakthrough! Grab the verified bonus at https://fast-airdrop-promo.xyz with code BOOST99 right now!"`,
-    `tw_102,promo_node_02,soc_bot_02,launch_thread,${iso(-880_000)},tw_101,https://fast-airdrop-promo.xyz,194.26.135.22,${acctSync},fp_win11_sync_88,5,"Confirmed working! Used code BOOST99 on https://fast-airdrop-promo.xyz and payout arrived instantly!"`,
-    `tw_103,promo_node_03,soc_bot_03,launch_thread,${iso(-860_000)},tw_101,https://fast-airdrop-promo.xyz,185.220.101.33,${acctSync},fp_win11_sync_88,5,"Everyone switch over today — claim code BOOST99 at https://fast-airdrop-promo.xyz before quota closes!"`,
-    `tw_104,promo_node_04,soc_bot_04,launch_thread,${iso(-840_000)},tw_101,https://fast-airdrop-promo.xyz,91.132.147.44,${acctSync},fp_win11_sync_88,5,"100% legit vouch for https://fast-airdrop-promo.xyz using code BOOST99 right now!"`,
-    `tw_105,promo_node_05,soc_bot_05,product_hub,${iso(-580_000)},,https://fast-airdrop-promo.xyz,45.155.205.14,${acctSync},fp_win11_sync_88,5,"Best platform upgrade of 2026! Redeem BOOST99 at https://fast-airdrop-promo.xyz today!"`,
-    `tw_106,promo_node_06,soc_bot_06,product_hub,${iso(-560_000)},tw_105,https://fast-airdrop-promo.xyz,194.26.135.29,${acctSync},fp_win11_sync_88,5,"Vouching for https://fast-airdrop-promo.xyz — BOOST99 worked smoothly for our whole team!"`,
-    `tw_107,promo_node_07,soc_bot_07,product_hub,${iso(-540_000)},tw_105,https://fast-airdrop-promo.xyz,185.220.101.39,${acctSync},fp_win11_sync_88,5,"Dont miss https://fast-airdrop-promo.xyz with code BOOST99 before midnight!"`,
-    `tw_108,promo_node_08,soc_bot_08,product_hub,${iso(-520_000)},tw_105,https://fast-airdrop-promo.xyz,91.132.147.49,${acctSync},fp_win11_sync_88,5,"Verified bonus link https://fast-airdrop-promo.xyz code BOOST99 works globally!"`,
-    `tw_201,claire_m,org_user_01,launch_thread,${iso(-7200_000)},,,86.142.81.15,2022-04-10T09:15:00Z,fp_mac_claire,4,"Interesting product roadmap, though I am waiting to see independent latency benchmarks first."`,
-    `tw_202,mikael_dev,org_user_02,product_hub,${iso(-6100_000)},,,88.114.202.41,2021-11-02T14:20:00Z,fp_linux_mikael,3,"Firmware setup took about ten minutes on our test bench. Documentation could be clearer on VLAN tags."`,
-    `tw_203,sarah_k,org_user_03,launch_thread,${iso(-4800_000)},,,73.162.48.92,2020-08-19T18:05:00Z,fp_ios_sarah,5,"Solid hardware build quality so far in our small office deployment."`,
-    `tw_204,david_r,org_user_04,support_forum,${iso(-3900_000)},,,80.12.44.18,2023-01-25T11:45:00Z,fp_win_david,2,"Support ticket took two days to answer, which was frustrating during our migration."`,
-    `tw_205,nina_p,org_user_05,product_hub,${iso(-2900_000)},,,90.18.77.61,2021-05-12T08:30:00Z,fp_mac_nina,4,"Good battery endurance on the portable model compared to last year."`,
+    // Campaign 1: 8-account promo amplification ring with 2 Co-Originators (@crypto_apex_alpha, @defi_insider_vault)
+    `tw_101,crypto_apex_alpha,sess_7a9f_airdrop_lead,launch_thread,${iso(-900_000)},,https://fast-airdrop-promo.xyz,45.155.205.11,${acctSync},fp_win11_sync_88,5,"Huge breakthrough! Grab the verified bonus at https://fast-airdrop-promo.xyz with code BOOST99 right now!"`,
+    `tw_102,yield_hunter_99,sess_9b14_boost1,launch_thread,${iso(-880_000)},tw_101,https://fast-airdrop-promo.xyz,194.26.135.22,${acctSync},fp_win11_sync_88,5,"Confirmed working! Used code BOOST99 on https://fast-airdrop-promo.xyz and payout arrived instantly!"`,
+    `tw_103,moon_shot_alex,sess_9b15_boost2,launch_thread,${iso(-860_000)},tw_101,https://fast-airdrop-promo.xyz,185.220.101.33,${acctSync},fp_win11_sync_88,5,"Everyone switch over today — claim code BOOST99 at https://fast-airdrop-promo.xyz before quota closes!"`,
+    `tw_104,token_whale_dan,sess_9b16_boost3,launch_thread,${iso(-840_000)},tw_101,https://fast-airdrop-promo.xyz,91.132.147.44,${acctSync},fp_win11_sync_88,5,"100% legit vouch for https://fast-airdrop-promo.xyz using code BOOST99 right now!"`,
+    `tw_105,defi_insider_vault,sess_8c2e_airdrop_seed2,product_hub,${iso(-580_000)},,https://fast-airdrop-promo.xyz,45.155.205.14,${acctSync},fp_win11_sync_88,5,"Best platform upgrade of 2026! Redeem BOOST99 at https://fast-airdrop-promo.xyz today!"`,
+    `tw_106,satoshi_pulse,sess_9b17_boost4,product_hub,${iso(-560_000)},tw_105,https://fast-airdrop-promo.xyz,194.26.135.29,${acctSync},fp_win11_sync_88,5,"Vouching for https://fast-airdrop-promo.xyz — BOOST99 worked smoothly for our whole team!"`,
+    `tw_107,web3_scout_jen,sess_9b18_boost5,product_hub,${iso(-540_000)},tw_105,https://fast-airdrop-promo.xyz,185.220.101.39,${acctSync},fp_win11_sync_88,5,"Dont miss https://fast-airdrop-promo.xyz with code BOOST99 before midnight!"`,
+    `tw_108,altcoin_vector,sess_9b19_boost6,product_hub,${iso(-520_000)},tw_105,https://fast-airdrop-promo.xyz,91.132.147.49,${acctSync},fp_win11_sync_88,5,"Verified bonus link https://fast-airdrop-promo.xyz code BOOST99 works globally!"`,
+    // Campaign 2: 6-account competitor review-bomb brigade with 2 Co-Originators (@sysadmin_mark_w, @enterprise_net_steve)
+    `tw_301,sysadmin_mark_w,sess_c3f1_ngx_lead1,product_quantum_router,${iso(-3600_000)},,https://netgearx-deals.io,104.244.76.11,${acctSync2},fp_ngx_shill_77,1,"Total garbage hardware! Switching every branch to https://netgearx-deals.io with code SWITCH2NGX today!"`,
+    `tw_302,datacenter_dave,sess_e5b3_ngx_amp1,product_quantum_router,${iso(-3580_000)},tw_301,https://netgearx-deals.io,104.244.76.14,${acctSync2},fp_ngx_shill_77,1,"Same experience—unusable latency! Grab https://netgearx-deals.io using code SWITCH2NGX instead!"`,
+    `tw_303,noc_engineer_ryan,sess_e5b4_ngx_amp2,product_quantum_router,${iso(-3560_000)},tw_301,https://netgearx-deals.io,104.244.76.19,${acctSync2},fp_ngx_shill_77,1,"Returning ours immediately and ordering via https://netgearx-deals.io code SWITCH2NGX right now!"`,
+    `tw_304,enterprise_net_steve,sess_d4a2_ngx_lead2,product_poe_switch_24p,${iso(-3540_000)},,https://netgearx-deals.io,104.244.76.22,${acctSync2},fp_ngx_shill_77,1,"Avoid this PoE switch! Check https://netgearx-deals.io and redeem SWITCH2NGX for real throughput!"`,
+    `tw_305,homelab_tech_kevin,sess_e5b5_ngx_amp3,product_poe_switch_24p,${iso(-3520_000)},tw_304,https://netgearx-deals.io,104.244.76.27,${acctSync2},fp_ngx_shill_77,1,"100% agree—moved all racks to https://netgearx-deals.io using promo code SWITCH2NGX!"`,
+    `tw_306,switch_guru_brad,sess_e5b6_ngx_amp4,product_poe_switch_24p,${iso(-3500_000)},tw_304,https://netgearx-deals.io,104.244.76.31,${acctSync2},fp_ngx_shill_77,1,"Worst unit we ever bought! Switch to https://netgearx-deals.io with code SWITCH2NGX before stock ends!"`,
+    // Organic Shoppers & Community Participants (22 diverse posts, distinct /24 subnets)
+    `tw_201,claire_m,sess_u01_claire,launch_thread,${iso(-7200_000)},,,86.142.81.15,2022-04-10T09:15:00Z,fp_mac_claire,4,"Interesting product roadmap, though I am waiting to see independent latency benchmarks first."`,
+    `tw_202,mikael_dev,sess_u02_mikael,product_hub,${iso(-6100_000)},,,88.114.202.41,2021-11-02T14:20:00Z,fp_linux_mikael,3,"Firmware setup took about ten minutes on our test bench. Documentation could be clearer on VLAN tags."`,
+    `tw_203,sarah_k,sess_u03_sarah,launch_thread,${iso(-4800_000)},,,73.162.48.92,2020-08-19T18:05:00Z,fp_ios_sarah,5,"Solid hardware build quality so far in our small office deployment."`,
+    `tw_204,david_r,sess_u04_david,support_forum,${iso(-3900_000)},,,80.12.44.18,2023-01-25T11:45:00Z,fp_win_david,2,"Support ticket took two days to answer, which was frustrating during our migration."`,
+    `tw_205,nina_p,sess_u05_nina,product_hub,${iso(-2900_000)},,,90.18.77.61,2021-05-12T08:30:00Z,fp_mac_nina,4,"Good battery endurance on the portable model compared to last year."`,
+    `tw_206,kenji_t,sess_u06_kenji,product_quantum_router,${iso(-8400_000)},,,118.23.91.44,2020-03-14T04:12:00Z,fp_mac_kenji,5,"Wi-Fi 7 MLO throughput across our Tokyo studio easily saturated our 2.5G fiber line."`,
+    `tw_207,elena_v,sess_u07_elena,product_nvme_nas_8bay,${iso(-9600_000)},,,80.12.45.89,2019-12-01T16:40:00Z,fp_linux_elena,5,"Populated six bays with 4TB drives in RAID-Z2 and SMB multichannel hit 2.8 GB/s."`,
+    `tw_208,lucas_b,sess_u08_lucas,product_poe_switch_24p,${iso(-11200_000)},,,177.54.144.30,2022-09-18T21:10:00Z,fp_win_lucas,4,"Runs 12 PoE+ cameras cleanly; fans ramp slightly above 200W load."`,
+    `tw_209,priya_n,sess_u09_priya,product_cloud_firewall,${iso(-12800_000)},,,73.162.49.51,2021-07-04T13:22:00Z,fp_mac_priya,5,"Zero packet drop during peak checkout hours and the WooCommerce telemetry plugin installed cleanly."`,
+    `tw_210,omar_h,sess_u10_omar,support_forum,${iso(-14400_000)},,,86.142.82.66,2023-05-09T10:05:00Z,fp_win_omar,3,"Carrier tracking stayed stuck for 48 hours on holiday dispatch, though support resolved it."`,
+    `tw_211,hannah_w,sess_u11_hannah,product_yubikey_fips_pack,${iso(-16200_000)},,,76.98.12.31,2020-11-11T15:30:00Z,fp_mac_hannah,5,"FIDO2 enrollment for GitHub and AWS SSO took less than two minutes per engineer."`,
+    `tw_212,mateo_s,sess_u12_mateo,product_ups_1500va,${iso(-18000_000)},,,177.54.145.71,2022-02-19T19:45:00Z,fp_linux_mateo,5,"Pure sine wave output kept our rack NAS quiet during two voltage sags this month."`,
+    `tw_213,sofia_r,sess_u13_sofia,launch_thread,${iso(-21600_000)},,,90.18.78.12,2021-01-30T07:50:00Z,fp_ios_sofia,4,"Shipping box arrived well-padded and all SFP+ dust caps were intact."`,
+    `tw_214,noah_k,sess_u14_noah,product_quantum_router,${iso(-25200_000)},,,98.144.22.14,2019-06-15T12:18:00Z,fp_win_noah,4,"Hotfix v4.2.1 cleared the WireGuard MTU issue we saw on dual-WAN failover."`,
+    `tw_215,maya_l,sess_u15_maya,product_cloud_firewall,${iso(-28800_000)},,,73.162.50.105,2022-08-27T17:02:00Z,fp_mac_maya,5,"Silent fanless enclosure fits nicely inside our retail store telecom closet."`,
+    `tw_216,viktor_d,sess_u16_viktor,product_nvme_nas_8bay,${iso(-32400_000)},,,88.114.203.98,2020-10-08T09:44:00Z,fp_linux_viktor,4,"Would love tool-less latch tabs on the NVMe sleds, otherwise storage speeds are phenomenal."`,
+    `tw_217,daniel_c,sess_u17_daniel,support_forum,${iso(-36000_000)},,,86.142.83.91,2023-03-17T14:55:00Z,fp_win_daniel,2,"One power brick arrived DOA in our bulk order; RMA cross-ship took four business days."`,
+    `tw_218,sara_f,sess_u18_sara,product_poe_switch_24p,${iso(-39600_000)},,,80.12.46.54,2021-09-03T11:20:00Z,fp_mac_sara,5,"SNMP per-port wattage graphing in Grafana worked immediately using the vendor MIB."`,
+    `tw_219,liam_o,sess_u19_liam,product_yubikey_fips_pack,${iso(-43200_000)},,,76.98.13.77,2022-11-22T16:10:00Z,fp_linux_liam,4,"USB-C tap works great on Fedora; NFC requires removing thick MagSafe cases."`,
+    `tw_220,alex_p,sess_u20_alex,product_ups_1500va,${iso(-46800_000)},,,98.144.23.88,2020-04-05T08:15:00Z,fp_win_alex,5,"NUT daemon over USB HID detected runtime and battery voltage right away."`,
+    `tw_221,chloe_g,sess_u21_chloe,product_hub,${iso(-50400_000)},,,90.18.79.45,2021-12-12T10:33:00Z,fp_ios_chloe,4,"Appreciate the clear SHA256 checksums published on the security advisory page."`,
+    `tw_222,henrik_s,sess_u22_henrik,launch_thread,${iso(-54000_000)},,,91.152.14.21,2019-08-09T13:50:00Z,fp_mac_henrik,5,"Running Verius plugin on our Helsinki WooCommerce shop with zero false positives."`,
   ];
   return rows.join("\n");
 }

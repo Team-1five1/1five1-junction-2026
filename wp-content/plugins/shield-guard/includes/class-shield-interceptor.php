@@ -15,6 +15,7 @@ class Shield_Interceptor {
 
     private function __construct() {
         add_action('init', array($this, 'ensure_author_session_cookie'));
+        add_action('init', array($this, 'inspect_live_traffic_traps'), 1);
         add_filter('pre_comment_approved', array($this, 'auto_approve_bot_illusion'), 99, 2);
         add_action('shield_retry_ingest', array($this, 'dispatch_comment'));
         add_action('pre_get_comments', function($query) {
@@ -143,10 +144,9 @@ class Shield_Interceptor {
     }
 
     /**
-     * Hook wp_login_failed: streams real WordPress authentication failure events
-     * to Clean the Traffic (/v1/traffic/event) with targeted username hints.
+     * Streams a live request telemetry event to Clean the Traffic (/v1/traffic/event).
      */
-    public function on_login_failed($username) {
+    private function send_traffic_event($path, $method = 'GET', $status_code = 403, $username = null) {
         $options = get_option('shield_guard_settings', array());
         $configured_url = !empty($options['api_url']) ? rtrim($options['api_url'], '/') : 'http://127.0.0.1:4000';
         if (strpos($configured_url, '127.0.0.1:4000') !== false || strpos($configured_url, 'localhost:4000') !== false) {
@@ -162,6 +162,17 @@ class Shield_Interceptor {
                 : (!empty($_SERVER['REMOTE_ADDR']) ? sanitize_text_field($_SERVER['REMOTE_ADDR']) : '127.0.0.1'));
         $visitor_ua = !empty($_SERVER['HTTP_USER_AGENT']) ? sanitize_text_field($_SERVER['HTTP_USER_AGENT']) : 'unknown';
 
+        $payload = array(
+            'ipAddress'  => $visitor_ip,
+            'method'     => strtoupper($method),
+            'path'       => $path,
+            'statusCode' => intval($status_code),
+            'userAgent'  => $visitor_ua,
+        );
+        if ($username !== null && $username !== '') {
+            $payload['username'] = sanitize_user(strval($username), true);
+        }
+
         wp_remote_post($api_url . '/v1/traffic/event', array(
             'method'      => 'POST',
             'blocking'    => false,
@@ -170,16 +181,40 @@ class Shield_Interceptor {
                 'Content-Type' => 'application/json',
                 'X-Shield-Key' => $api_key,
             ),
-            'body'        => wp_json_encode(array(
-                'ipAddress'  => $visitor_ip,
-                'method'     => 'POST',
-                'path'       => '/wp-login.php',
-                'statusCode' => 401,
-                'userAgent'  => $visitor_ua,
-                'username'   => sanitize_user(strval($username), true),
-            )),
+            'body'        => wp_json_encode($payload),
             'data_format' => 'body',
         ));
+    }
+
+    /**
+     * Hook init (priority 1): streams live honeypot link hits, author enumeration probes,
+     * and xmlrpc.php POST probes into Clean the Traffic (/v1/traffic/event).
+     */
+    public function inspect_live_traffic_traps() {
+        if (!empty($_GET['shield_trap'])) {
+            $trap_val = rawurlencode(sanitize_text_field(wp_unslash($_GET['shield_trap'])));
+            $this->send_traffic_event('/?shield_trap=' . $trap_val, 'GET', 403);
+            return;
+        }
+
+        if (!is_admin() && isset($_GET['author']) && is_numeric($_GET['author'])) {
+            $this->send_traffic_event('/?author=' . intval($_GET['author']), 'GET', 403);
+            return;
+        }
+
+        $req_uri = isset($_SERVER['REQUEST_URI']) ? strval($_SERVER['REQUEST_URI']) : '';
+        $req_method = strtoupper(isset($_SERVER['REQUEST_METHOD']) ? strval($_SERVER['REQUEST_METHOD']) : 'GET');
+        if ($req_uri !== '' && stripos($req_uri, 'xmlrpc.php') !== false && $req_method === 'POST') {
+            $this->send_traffic_event('/xmlrpc.php', 'POST', 403);
+        }
+    }
+
+    /**
+     * Hook wp_login_failed: streams real WordPress authentication failure events
+     * to Clean the Traffic (/v1/traffic/event) with targeted username hints.
+     */
+    public function on_login_failed($username) {
+        $this->send_traffic_event('/wp-login.php', 'POST', 401, $username);
     }
 
     public function dispatch_comment($comment_id) {

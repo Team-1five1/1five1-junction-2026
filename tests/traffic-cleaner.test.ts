@@ -311,4 +311,50 @@ describe("Traffic Cleaner (Clean the Traffic)", () => {
     expect(threat?.authAttackType).toBe("CREDENTIAL_STUFFING");
     expect(threat?.distinctTargetedUsers).toBe(3);
   });
+
+  it("verifies authentic vs spoofed crawlers via POST /api/dashboard/traffic/verify-bot and POST /v1/traffic/verify-bot", async () => {
+    const authenticRes = await app.fetch(
+      new Request("http://localhost/api/dashboard/traffic/verify-bot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ipAddress: "66.249.66.1",
+          claimedBotName: "Googlebot",
+          asnLabel: "Google LLC",
+        }),
+      })
+    );
+    expect(authenticRes.status).toBe(200);
+    const authBody = (await authenticRes.json()) as any;
+    expect(authBody.verified).toBe(true);
+    expect(authBody.verdict).toBe("AUTHENTIC_CRAWLER");
+
+    const spoofedRes = await app.fetch(
+      new Request("http://localhost/v1/traffic/verify-bot", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shield-Key": "default_tenant",
+        },
+        body: JSON.stringify({
+          ipAddress: "185.220.101.33",
+          claimedBotName: "Googlebot",
+          asnLabel: "Tor / Datacenter Exit",
+        }),
+      })
+    );
+    expect(spoofedRes.status).toBe(200);
+    const spoofBody = (await spoofedRes.json()) as any;
+    expect(spoofBody.verified).toBe(false);
+    expect(spoofBody.verdict).toBe("SPOOFED_BOT");
+
+    const badRes = await app.fetch(
+      new Request("http://localhost/api/dashboard/traffic/verify-bot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ipAddress: "" }),
+      })
+    );
+    expect(badRes.status).toBe(400);
+  });
 });

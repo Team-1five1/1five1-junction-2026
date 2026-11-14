@@ -760,6 +760,25 @@ export function cleanTrafficLogs(
       !VULNERABILITY_PROBE_PATTERNS.some((p) => p.test(e.path)) &&
       !isIpAllowlisted(e.ipAddress, options)
     ) {
+      const matchedGoodBot = KNOWN_GOOD_BOTS.find((b) => b.pattern.test(e.userAgent));
+      if (
+        matchedGoodBot &&
+        verifyGoodBotOrigin(
+          e.ipAddress,
+          matchedGoodBot.name,
+          resolveOriginGeo({
+            ipAddress: e.ipAddress,
+            authorSessionHash: `traffic_${e.ipAddress}`,
+            wpCommentId: 0,
+            authorType: "bot",
+          }).asnLabel
+        )
+      ) {
+        continue;
+      }
+      if (AI_CRAWLER_DEFINITIONS.some((a) => a.pattern.test(e.userAgent))) {
+        continue;
+      }
       const ipAssetRatio = ipAssetRatioMap.get(e.ipAddress) ?? 1;
       const isSuspiciousUa = KNOWN_SUSPICIOUS_UA_PATTERNS.some((p) => p.test(e.userAgent));
       if (ipAssetRatio < 0.08 || isSuspiciousUa) {
@@ -1432,8 +1451,10 @@ export function cleanTrafficLogs(
 }
 
 /**
- * Generates realistic web server access log samples for demonstrations,
- * automated benchmarks, and site-owner test runs.
+ * Generates realistic web server access log samples (~1,130+ requests across
+ * ~6 hours and 35+ unique IPs) modeled on a busy 5,000-daily-visitor web shop
+ * with organic shoppers, verified bots, AI crawlers, spoofed bots, distributed
+ * credential stuffing + ATO, sequential scrapers, and vulnerability scanners.
  */
 export function generateRealisticTrafficLogs(): string {
   const now = new Date();
@@ -1453,96 +1474,188 @@ export function generateRealisticTrafficLogs(): string {
       "Nov",
       "Dec",
     ];
-    return `${pad(d.getDate())}/${months[d.getMonth()]}/${d.getFullYear()}:${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())} +0000`;
+    return `${pad(d.getUTCDate())}/${months[d.getUTCMonth()]}/${d.getUTCFullYear()}:${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} +0000`;
   };
 
   const lines: string[] = [];
 
-  // 1. Real Human Shoppers (Organic traffic with CSS, JS, Product pages)
+  // 1. Real Human Shoppers (~720 requests across 18 residential IPs over 6 hours)
+  const shopperIps = [
+    "86.142.81.10", "86.142.81.11", "86.142.81.12", "86.142.81.13", "86.142.81.14", "86.142.81.15",
+    "73.162.48.20", "73.162.48.21", "73.162.48.22", "73.162.48.23", "73.162.48.24", "73.162.48.25",
+    "80.12.44.30", "80.12.44.31", "80.12.44.32", "80.12.44.33", "80.12.44.34", "80.12.44.35",
+  ];
+  const shopPages = [
+    "/",
+    "/shop",
+    "/product/quantum-router",
+    "/product/cloud-firewall",
+    "/product/nvme-nas-8bay",
+    "/product/poe-switch-24p",
+    "/product/yubikey-fips-pack",
+    "/blog/firmware-v4-2",
+    "/cart",
+    "/checkout",
+  ];
+  const humanUas = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
+  ];
+
+  for (let s = 0; s < 180; s++) {
+    const offsetMs = (180 - s) * 115_000 + (s % 5) * 3200; // spreads across ~5.8 hours
+    const time = new Date(now.getTime() - offsetMs);
+    const ip = shopperIps[s % shopperIps.length]!;
+    const page = shopPages[s % shopPages.length]!;
+    const ua = humanUas[s % humanUas.length]!;
+    const ref = s % 3 === 0 ? "https://google.com/" : "https://shop.example.com/shop";
+
+    lines.push(`${ip} - - [${formatTime(time)}] "GET ${page} HTTP/1.1" 200 6420 "${ref}" "${ua}"`);
+    lines.push(`${ip} - - [${formatTime(new Date(time.getTime() + 180))}] "GET /assets/style.css HTTP/1.1" 200 14200 "https://shop.example.com${page}" "${ua}"`);
+    lines.push(`${ip} - - [${formatTime(new Date(time.getTime() + 310))}] "GET /assets/bundle.js HTTP/1.1" 200 89400 "https://shop.example.com${page}" "${ua}"`);
+    lines.push(`${ip} - - [${formatTime(new Date(time.getTime() + 470))}] "GET /images/product-hero.webp HTTP/1.1" 200 48600 "https://shop.example.com${page}" "${ua}"`);
+  }
+
+  // 2. Verified Search Engine Crawlers (~70 requests across Googlebot, Bingbot, Applebot)
   for (let i = 0; i < 40; i++) {
-    const time = new Date(now.getTime() - (40 - i) * 12000);
-    const ip = `86.142.81.${10 + (i % 5)}`; // UK BT Residential
-    const ua =
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
-    lines.push(
-      `${ip} - - [${formatTime(time)}] "GET /product/laptop-pro-15 HTTP/1.1" 200 4820 "https://google.com" "${ua}"`
-    );
-    lines.push(
-      `${ip} - - [${formatTime(new Date(time.getTime() + 150))}] "GET /assets/style.css HTTP/1.1" 200 12400 "https://example.com/product/laptop-pro-15" "${ua}"`
-    );
-    lines.push(
-      `${ip} - - [${formatTime(new Date(time.getTime() + 250))}] "GET /assets/bundle.js HTTP/1.1" 200 84200 "https://example.com/product/laptop-pro-15" "${ua}"`
-    );
-    lines.push(
-      `${ip} - - [${formatTime(new Date(time.getTime() + 400))}] "GET /images/laptop-front.webp HTTP/1.1" 200 45200 "https://example.com/product/laptop-pro-15" "${ua}"`
-    );
-  }
-
-  // 2. Verified Good Bot (Googlebot indexing products at polite rate from 66.249.66.x)
-  for (let i = 0; i < 15; i++) {
-    const time = new Date(now.getTime() - (20 - i) * 25000);
-    const ip = `66.249.66.${1 + i}`; // Google LLC IP
+    const time = new Date(now.getTime() - (45 - i) * 420_000);
+    const ip = `66.249.66.${1 + (i % 12)}`;
     const ua = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+    const path = i % 10 === 0 ? "/robots.txt" : i % 10 === 1 ? "/sitemap.xml" : `/product/item-${i + 1}`;
+    lines.push(`${ip} - - [${formatTime(time)}] "GET ${path} HTTP/1.1" 200 4120 "-" "${ua}"`);
+  }
+  for (let i = 0; i < 20; i++) {
+    const time = new Date(now.getTime() - (30 - i) * 540_000);
+    const ip = `40.77.167.${10 + (i % 6)}`;
+    const ua = "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)";
+    const path = i % 8 === 0 ? "/sitemap.xml" : `/shop/category-${(i % 4) + 1}`;
+    lines.push(`${ip} - - [${formatTime(time)}] "GET ${path} HTTP/1.1" 200 5340 "-" "${ua}"`);
+  }
+  for (let i = 0; i < 10; i++) {
+    const time = new Date(now.getTime() - (20 - i) * 600_000);
+    const ip = `17.58.98.${20 + (i % 3)}`;
+    const ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0 Safari/605.1.15 (Applebot/0.1; +http://www.apple.com/go/applebot)";
+    lines.push(`${ip} - - [${formatTime(time)}] "GET /product/quantum-router HTTP/1.1" 200 6200 "-" "${ua}"`);
+  }
+
+  // 3. AI & SEO Crawlers (~55 requests across GPTBot, ClaudeBot, PerplexityBot, Bytespider, CCBot)
+  for (let i = 0; i < 16; i++) {
+    const time = new Date(now.getTime() - (40 - i) * 310_000);
     lines.push(
-      `${ip} - - [${formatTime(time)}] "GET /product/item-${i + 1} HTTP/1.1" 200 4120 "-" "${ua}"`
+      `20.171.207.15 - - [${formatTime(time)}] "GET /product/guide-${i + 1} HTTP/1.1" 200 11200 "-" "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.2; +https://openai.com/gptbot"`
+    );
+  }
+  for (let i = 0; i < 12; i++) {
+    const time = new Date(now.getTime() - (35 - i) * 340_000);
+    lines.push(
+      `160.79.104.22 - - [${formatTime(time)}] "GET /docs/architecture-${i + 1} HTTP/1.1" 200 9400 "-" "ClaudeBot/1.0; +claudebot@anthropic.com"`
+    );
+  }
+  for (let i = 0; i < 10; i++) {
+    const time = new Date(now.getTime() - (28 - i) * 380_000);
+    lines.push(
+      `44.221.18.40 - - [${formatTime(time)}] "GET /blog/specs-${i + 1} HTTP/1.1" 200 8800 "-" "PerplexityBot/1.0; +https://perplexity.ai/perplexitybot"`
+    );
+  }
+  for (let i = 0; i < 10; i++) {
+    const time = new Date(now.getTime() - (22 - i) * 290_000);
+    lines.push(
+      `47.246.29.12 - - [${formatTime(time)}] "GET /shop/specs-${i + 1} HTTP/1.1" 200 14200 "-" "Mozilla/5.0 (Linux; Android 5.0) AppleWebKit/537.36 (KHTML, like Gecko) Mobile Safari/537.36; Bytespider"`
+    );
+  }
+  for (let i = 0; i < 7; i++) {
+    const time = new Date(now.getTime() - (18 - i) * 410_000);
+    lines.push(
+      `54.81.112.90 - - [${formatTime(time)}] "GET /catalogue/archive-${i + 1} HTTP/1.1" 200 10500 "-" "CCBot/2.0 (https://commoncrawl.org/faq/)"`
     );
   }
 
-  // 3. Spoofed Googlebot (Unauthorized Tor/datacenter node impersonating Googlebot)
-  for (let i = 0; i < 4; i++) {
-    const time = new Date(now.getTime() - (10 - i) * 5000);
-    const ip = "185.220.101.99";
-    const ua = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+  // 4. Spoofed Crawlers (~24 requests impersonating Googlebot & Bingbot from Tor/datacenter IPs)
+  for (let i = 0; i < 14; i++) {
+    const time = new Date(now.getTime() - (25 - i) * 18_000);
     lines.push(
-      `${ip} - - [${formatTime(time)}] "GET /pricing/enterprise-${i + 1} HTTP/1.1" 200 18400 "-" "${ua}"`
+      `185.220.101.99 - - [${formatTime(time)}] "GET /pricing/enterprise-${i + 1} HTTP/1.1" 200 22400 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"`
+    );
+  }
+  for (let i = 0; i < 10; i++) {
+    const time = new Date(now.getTime() - (20 - i) * 22_000);
+    lines.push(
+      `45.155.205.88 - - [${formatTime(time)}] "GET /api/v1/export?page=${i + 1} HTTP/1.1" 200 19800 "-" "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)"`
     );
   }
 
-  // 4. Credential-Stuffing Botnet (Bursts of POSTs to /wp-login.php with failed 401s across accounts)
+  // 5. Distributed Credential-Stuffing & Account Takeover Wave (~120 POSTs across 5 botnet IPs)
   const stufferIps = [
     "185.220.101.5",
     "185.220.101.19",
     "45.155.205.14",
     "91.132.147.88",
+    "194.26.135.55",
   ];
-  const stufferUsers = ["alice", "bob", "admin", "finance", "support", "ceo"];
-  for (let i = 0; i < 60; i++) {
-    const time = new Date(now.getTime() - (60 - i) * 1500);
+  const stufferUsers = [
+    "alice", "bob", "admin", "finance", "support",
+    "ceo", "ops", "billing", "fulfillment", "dev",
+  ];
+  const stufferUa =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+  for (let i = 0; i < 119; i++) {
+    const time = new Date(now.getTime() - (125 - i) * 3800);
     const ip = stufferIps[i % stufferIps.length]!;
     const targetUser = stufferUsers[i % stufferUsers.length]!;
-    const ua =
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+    const loginPath = i % 5 === 0 ? "/xmlrpc.php" : "/wp-login.php";
     lines.push(
-      `${ip} - - [${formatTime(time)}] "POST /wp-login.php?user=${targetUser} HTTP/1.1" 401 1420 "https://example.com/wp-login.php" "${ua}"`
+      `${ip} - - [${formatTime(time)}] "POST ${loginPath}?user=${targetUser} HTTP/1.1" 401 1420 "https://shop.example.com/wp-login.php" "${stufferUa}"`
     );
   }
+  // Account Takeover event: repeated 401s on 185.220.101.5 followed by a 302 authenticated redirect
+  lines.push(
+    `185.220.101.5 - - [${formatTime(new Date(now.getTime() - 2000))}] "POST /wp-login.php?user=finance HTTP/1.1" 302 980 "https://shop.example.com/wp-login.php" "${stufferUa}"`
+  );
 
-  // 4b. AI Training Crawlers (OpenAI GPTBot & Anthropic ClaudeBot)
-  for (let i = 0; i < 8; i++) {
-    const time = new Date(now.getTime() - (16 - i) * 9000);
+  // 6. Aggressive Catalogue Scrapers & Honeypot Trap Hits (~124 requests across 3 scraper nodes)
+  for (let i = 0; i < 40; i++) {
+    const time = new Date(now.getTime() - (85 - i) * 1400);
     lines.push(
-      `20.171.207.15 - - [${formatTime(time)}] "GET /product/guide-${i + 1} HTTP/1.1" 200 11200 "-" "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.2; +https://openai.com/gptbot"`
+      `104.244.76.13 - - [${formatTime(time)}] "GET /catalogue/page/${i + 1} HTTP/1.1" 200 11520 "-" "python-requests/2.31.0"`
+    );
+  }
+  lines.push(
+    `104.244.76.13 - - [${formatTime(new Date(now.getTime() - 18_000))}] "GET /honeypot-trap HTTP/1.1" 403 210 "-" "python-requests/2.31.0"`
+  );
+
+  for (let i = 0; i < 40; i++) {
+    const time = new Date(now.getTime() - (70 - i) * 2000);
+    const path = i === 0 ? "/robots.txt" : `/product/sku-${100 + i}`;
+    lines.push(
+      `198.51.100.42 - - [${formatTime(time)}] "GET ${path} HTTP/1.1" 200 9400 "-" "Scrapy/2.11.0 (+https://scrapy.org)"`
     );
   }
   for (let i = 0; i < 6; i++) {
-    const time = new Date(now.getTime() - (14 - i) * 11000);
+    const time = new Date(now.getTime() - (36 - i) * 1700);
     lines.push(
-      `160.79.104.22 - - [${formatTime(time)}] "GET /docs/architecture-${i + 1} HTTP/1.1" 200 9400 "-" "ClaudeBot/1.0; +claudebot@anthropic.com"`
+      `198.51.100.42 - - [${formatTime(time)}] "GET /catalogue/page/${41 + i} HTTP/1.1" 200 11520 "-" "python-requests/2.31.0"`
     );
   }
 
-  // 5. Aggressive Scraper (Scrapy / python-requests walking all catalogue pages without assets)
-  for (let i = 0; i < 50; i++) {
-    const time = new Date(now.getTime() - (50 - i) * 600);
-    const ip = "104.244.76.13"; // Datacenter proxy
-    const ua = "python-requests/2.31.0";
+  for (let i = 0; i < 30; i++) {
+    const time = new Date(now.getTime() - (48 - i) * 2500);
     lines.push(
-      `${ip} - - [${formatTime(time)}] "GET /catalogue/page/${i + 1} HTTP/1.1" 200 9520 "-" "${ua}"`
+      `185.220.101.44 - - [${formatTime(time)}] "GET /shop/page/${i + 1} HTTP/1.1" 200 10800 "-" "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/122.0.0.0"`
     );
   }
+  for (let i = 0; i < 6; i++) {
+    const time = new Date(now.getTime() - (24 - i) * 1900);
+    lines.push(
+      `185.220.101.44 - - [${formatTime(time)}] "GET /catalogue/page/${47 + i} HTTP/1.1" 200 11520 "-" "python-requests/2.31.0"`
+    );
+  }
+  lines.push(
+    `185.220.101.44 - - [${formatTime(new Date(now.getTime() - 9000))}] "GET /?shield_trap=bot_probe HTTP/1.1" 403 195 "-" "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/122.0.0.0"`
+  );
 
-  // 6. Vulnerability Scanner (Probing for .env, wp-config, git, and path traversal)
-  const scannerIp = "194.26.135.91";
+  // 7. Vulnerability & Exploit Scanners (~36 probes across 2 scanner IPs)
   const probePaths = [
     "/.env",
     "/wp-config.php.bak",
@@ -1552,11 +1665,25 @@ export function generateRealisticTrafficLogs(): string {
     "/backup.sql",
     "/../../etc/passwd",
     "/shell.php",
+    "/wp-json/wp/v2/users",
+    "/?author=1",
+    "/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php",
+    "/?s=router'%20UNION%20SELECT%201,2--",
+    "/?q=%3Cscript%3Ealert(1)%3C/script%3E",
+    "/.aws/credentials",
+    "/solr/admin/info/system",
+    "/autodiscover/autodiscover.xml",
+    "/admin/login.sql",
+    "/wp-config.php~",
   ];
   for (let i = 0; i < probePaths.length; i++) {
-    const time = new Date(now.getTime() - (10 - i) * 4000);
+    const t1 = new Date(now.getTime() - (22 - i) * 5500);
+    const t2 = new Date(now.getTime() - (22 - i) * 6100);
     lines.push(
-      `${scannerIp} - - [${formatTime(time)}] "GET ${probePaths[i]} HTTP/1.1" 404 162 "-" "curl/8.4.0"`
+      `194.26.135.91 - - [${formatTime(t1)}] "GET ${probePaths[i]} HTTP/1.1" 404 162 "-" "curl/8.4.0"`
+    );
+    lines.push(
+      `91.132.147.92 - - [${formatTime(t2)}] "GET ${probePaths[i]} HTTP/1.1" 404 162 "-" "sqlmap/1.8#stable"`
     );
   }
 

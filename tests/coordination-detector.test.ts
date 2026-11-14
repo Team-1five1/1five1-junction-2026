@@ -6,6 +6,8 @@ import {
   type RawSubmissionInput,
 } from "../src/engines/coordination-detector";
 import { cleanTrafficLogs } from "../src/engines/traffic-cleaner";
+import { getTenantSocialSubmissions } from "../src/routes/dashboard-api";
+import { inMemorySubmissions } from "../src/workers/evaluation-worker";
 import app from "../src/index";
 
 describe("Coordination Detector (Spot the Swarm)", () => {
@@ -569,5 +571,77 @@ describe("Coordination Detector (Spot the Swarm)", () => {
     expect(apiCsvRes.status).toBe(200);
     const apiBody = (await apiCsvRes.json()) as any;
     expect(apiBody.activeSwarmCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("quarantines a detected swarm to shadowbanned visibility and blocks its IPs in WAF rules via POST /api/dashboard/swarms/quarantine", async () => {
+    const tenantId = "quarantine_test_tenant";
+    const sampleCsv = generateSampleSocialDatasetCsv();
+
+    const importRes = await app.fetch(
+      new Request("http://localhost/api/dashboard/swarms/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dataset: sampleCsv,
+          mode: "replace",
+          onlyImported: true,
+          tenantId,
+        }),
+      })
+    );
+    expect(importRes.status).toBe(200);
+    const imported = (await importRes.json()) as any;
+    expect(imported.activeSwarmCount).toBeGreaterThanOrEqual(1);
+
+    const targetSwarm = imported.swarms[0]!;
+    const firstMember = targetSwarm.members[0]!;
+
+    // Also stage a matching in-memory submission to verify shadowbanning across stores
+    inMemorySubmissions.push({
+      id: "test-quarantine-sub-1",
+      wpCommentId: 999001,
+      entityId: "product-quarantine-test",
+      authorSessionHash: firstMember.sessionHash,
+      rawText: "Coordinated promotion",
+      rating: 5,
+      authorType: "human",
+      visibility: "public",
+      routingPath: "ROUTE_1_FAST_CLEAR",
+      modelUsed: "jev",
+      riskScore: 0,
+      shieldFlags: 0,
+      failedRiskIds: [],
+      triggeredShieldIds: [],
+      deepResearchExplanation: null,
+      ipAddress: firstMember.ipAddress,
+      createdAt: new Date(),
+      embedding: [],
+    });
+
+    const quarantineRes = await app.fetch(
+      new Request("http://localhost/api/dashboard/swarms/quarantine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ swarmId: targetSwarm.id, tenantId }),
+      })
+    );
+    expect(quarantineRes.status).toBe(200);
+    const qBody = (await quarantineRes.json()) as any;
+    expect(qBody.status).toBe("quarantined");
+    expect(qBody.swarmId).toBe(targetSwarm.id);
+    expect(qBody.quarantinedMembersCount).toBe(targetSwarm.memberCount);
+    expect(qBody.blockedIps.length).toBeGreaterThanOrEqual(1);
+
+    const updatedInMem = inMemorySubmissions.find((s) => s.id === "test-quarantine-sub-1");
+    expect(updatedInMem?.visibility).toBe("shadowbanned");
+    expect(updatedInMem?.routingPath).toBe("BOT_HONEYPOT");
+
+    const storedSocial = await getTenantSocialSubmissions(tenantId);
+    const quarantinedSocial = storedSocial.filter((s) => s.authorSessionHash === firstMember.sessionHash);
+    expect(quarantinedSocial.length).toBeGreaterThanOrEqual(1);
+    expect(quarantinedSocial.every((s) => s.visibility === "shadowbanned")).toBe(true);
+
+    const blockedIp = qBody.blockedIps[0] as string;
+    expect(qBody.trafficReport.firewallRules.nginxBlockRules).toContain(blockedIp);
   });
 });

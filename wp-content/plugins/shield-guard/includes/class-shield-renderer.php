@@ -21,6 +21,7 @@ class Shield_Renderer {
         add_filter('comment_text', array($this, 'render_comment_badges_and_explanation'), 99, 2);
         add_action('comment_form_before', array($this, 'render_post_review_banner'));
         add_action('woocommerce_before_single_product_summary', array($this, 'render_post_review_banner'));
+        add_action('wp_footer', array($this, 'render_honeypot_crawler_trap'), 99);
     }
 
     public function enqueue_frontend_assets() {
@@ -222,5 +223,14 @@ class Shield_Renderer {
         global $post;
         if (!$post) return;
         echo $this->get_post_banner_html($post->ID);
+    }
+
+    /**
+     * Outputs an invisible crawler honeypot link in the footer so automated scrapers
+     * ignoring CSS visibility / rel=nofollow stream straight into Clean the Traffic.
+     */
+    public function render_honeypot_crawler_trap() {
+        $trap_url = esc_url(home_url('/?shield_trap=bot_probe'));
+        echo '<div aria-hidden="true" style="display:none !important;visibility:hidden !important;"><a href="' . $trap_url . '" rel="nofollow" tabindex="-1">Site Directory Index</a></div>';
     }
 }

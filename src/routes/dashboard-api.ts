@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { inArray } from "drizzle-orm";
 import { db, sql } from "../db";
 import { submissions, honeypotVault, entityBanners } from "../db/schema";
 import { SEMEVAL_QUESTIONS, BUCKET_NAMES } from "../config/semeval-questions";
@@ -29,6 +30,7 @@ import {
 import {
   cleanTrafficLogs,
   generateRealisticTrafficLogs,
+  verifyGoodBotFcrDns,
   type TrafficCleanReport,
 } from "../engines/traffic-cleaner";
 
@@ -38,7 +40,66 @@ const tenantTrafficLogs = new Map<string, string>([
   ["default", generateRealisticTrafficLogs()],
 ]);
 const TRAFFIC_LOG_MAX_CHARS = 2_000_000;
+const tenantSocialDatasets = new Map<string, RawSubmissionInput[]>();
 let importedSocialSubmissions: RawSubmissionInput[] = [];
+
+export function formatCombinedLogTimestamp(date: Date): string {
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(date.getUTCDate())}/${months[date.getUTCMonth()]}/${date.getUTCFullYear()}:${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} +0000`;
+}
+
+export async function getTenantSocialSubmissions(tenantId = "default"): Promise<RawSubmissionInput[]> {
+  const tid = tenantId || "default";
+  const mem = tenantSocialDatasets.get(tid);
+  if (mem !== undefined) return mem;
+
+  await ensureDashboardSchema();
+  if (dbReachable) {
+    try {
+      const rows = await sql`
+        SELECT items_json FROM social_datasets
+        WHERE tenant_id = ${tid}
+        LIMIT 1
+      `;
+      if (Array.isArray(rows[0]?.items_json)) {
+        const items = rows[0].items_json as RawSubmissionInput[];
+        tenantSocialDatasets.set(tid, items);
+        if (tid === "default") importedSocialSubmissions = items;
+        return items;
+      }
+    } catch {
+      // fall through
+    }
+  }
+  return tid === "default" ? importedSocialSubmissions : [];
+}
+
+export async function saveTenantSocialSubmissions(
+  tenantId = "default",
+  items: RawSubmissionInput[]
+): Promise<RawSubmissionInput[]> {
+  const tid = tenantId || "default";
+  tenantSocialDatasets.set(tid, items);
+  if (tid === "default") {
+    importedSocialSubmissions = items;
+  }
+
+  await ensureDashboardSchema();
+  if (dbReachable) {
+    try {
+      await sql`
+        INSERT INTO social_datasets (tenant_id, items_json, updated_at)
+        VALUES (${tid}, ${JSON.stringify(items)}::jsonb, now())
+        ON CONFLICT (tenant_id) DO UPDATE
+        SET items_json = EXCLUDED.items_json, updated_at = now()
+      `;
+    } catch (err: any) {
+      console.warn(`social_datasets save warning: ${err.message}`);
+    }
+  }
+  return items;
+}
 
 export async function getTenantTrafficLogs(tenantId = "default"): Promise<string> {
   const tid = tenantId || "default";
@@ -149,6 +210,7 @@ interface UnifiedSubmission {
   replyToCommentId?: number | null;
   sharedUrl?: string | null;
   deviceFingerprint?: string | null;
+  telemetrySummary?: Record<string, any> | null;
   similarityScore?: number | null;
   honeypot: {
     ipAddress: string;
@@ -177,13 +239,47 @@ interface UnifiedSubmission {
   }>;
 }
 
-const DEMO_SEED_ITEMS = [
+interface DemoSeedItem {
+  wpCommentId: number;
+  entityId: string;
+  authorSessionHash: string;
+  authorHandle?: string;
+  sharedUrl?: string;
+  deviceFingerprint?: string;
+  accountCreatedHoursAgo?: number;
+  replyToCommentId?: number;
+  ipAddress?: string;
+  userAgent?: string;
+  telemetrySummary?: Record<string, any>;
+  rawText: string;
+  rating: number | null;
+  authorType: "human" | "bot";
+  visibility: "public" | "public_flagged" | "shadowbanned";
+  routingPath: string;
+  modelUsed: string;
+  riskScore: number;
+  shieldFlags: number;
+  failedRiskIds: string[];
+  triggeredShieldIds: string[];
+  deepResearchExplanation: string | null;
+  hoursAgo: number;
+  honeypot: {
+    ipAddress: string;
+    userAgent: string;
+    confidenceScore: number;
+    reasons: string[];
+    patternClusterId: string;
+    telemetry: Record<string, any>;
+  } | null;
+}
+
+const CORE_DEMO_SEED_ITEMS: DemoSeedItem[] = [
   // Bots caught in Honeypot Vault
   {
     wpCommentId: 901,
     entityId: "product_quantum_router",
-    authorSessionHash: "bot_88f1a90c",
-    authorHandle: "crypto_king_2026",
+    authorSessionHash: "sess_7a9f_crypto_apex",
+    authorHandle: "crypto_apex_alpha",
     sharedUrl: "http://claim-airdrop-fast.xyz",
     deviceFingerprint: "fp_bot_cluster_a1",
     accountCreatedHoursAgo: 4,
@@ -211,8 +307,8 @@ const DEMO_SEED_ITEMS = [
   {
     wpCommentId: 902,
     entityId: "product_quantum_router",
-    authorSessionHash: "bot_88f1a91d",
-    authorHandle: "crypto_king_2027",
+    authorSessionHash: "sess_9b14_yield_hunter",
+    authorHandle: "yield_hunter_99",
     sharedUrl: "http://claim-airdrop-fast.xyz",
     deviceFingerprint: "fp_bot_cluster_a1",
     accountCreatedHoursAgo: 4,
@@ -240,7 +336,8 @@ const DEMO_SEED_ITEMS = [
   {
     wpCommentId: 903,
     entityId: "post_firmware_v4_2",
-    authorSessionHash: "bot_44c9e112",
+    authorSessionHash: "sess_1f9b_cyber_leaks",
+    authorHandle: "cyber_leaks_global",
     rawText: "THIS COMPANY IS CONTROLLED BY THE GLOBALIST CABAL!! Share this immediately before the regime deletes our comments! Wake up sheeple!!",
     rating: 1,
     authorType: "bot" as const,
@@ -265,7 +362,8 @@ const DEMO_SEED_ITEMS = [
   {
     wpCommentId: 904,
     entityId: "post_firmware_v4_2",
-    authorSessionHash: "bot_44c9e199",
+    authorSessionHash: "sess_2e8a_counter_narrative",
+    authorHandle: "counter_narrative_x",
     rawText: "THE SHADOWY REGIME CONTROLS THIS PLATFORM!! Spread this everywhere before censorship wipes the truth! Wake up sheeple!",
     rating: 1,
     authorType: "bot" as const,
@@ -304,7 +402,7 @@ const DEMO_SEED_ITEMS = [
     deepResearchExplanation: null,
     hoursAgo: 42.0,
     honeypot: {
-      ipAddress: "45.155.205.19",
+      ipAddress: "45.155.209.19",
       userAgent: "curl/8.4.0",
       confidenceScore: 100,
       reasons: ["honeypot_filled", "zero_interaction_events"],
@@ -329,7 +427,7 @@ const DEMO_SEED_ITEMS = [
     deepResearchExplanation: null,
     hoursAgo: 96.0,
     honeypot: {
-      ipAddress: "194.26.135.71",
+      ipAddress: "194.26.139.71",
       userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PhantomJS/2.1.1",
       confidenceScore: 94,
       reasons: ["webdriver_detected", "zero_interaction_events"],
@@ -343,6 +441,8 @@ const DEMO_SEED_ITEMS = [
     wpCommentId: 907,
     entityId: "post_firmware_v4_2",
     authorSessionHash: "hum_31a8f002",
+    ipAddress: "185.220.104.73",
+    telemetrySummary: { keystrokeFlightVariance: 22, formCompletionTimeMs: 11800, botdDetected: false, webdriver: false },
     rawText: "Everyone knows the puppet masters running this company are traitors trying to destroy our way of life! Either you boycott them right now or you're complicit—share before they censor this!",
     rating: 1,
     authorType: "human" as const,
@@ -362,6 +462,8 @@ const DEMO_SEED_ITEMS = [
     wpCommentId: 908,
     entityId: "post_security_advisory",
     authorSessionHash: "hum_62c1d440",
+    ipAddress: "178.62.11.40",
+    telemetrySummary: { keystrokeFlightVariance: 29, formCompletionTimeMs: 15200, botdDetected: false, webdriver: false },
     rawText: "These developers are parasites and scumbags who secretively sell every user's banking data to the regime. 100% undeniable proof that all of them are corrupt!",
     rating: 1,
     authorType: "human" as const,
@@ -383,8 +485,9 @@ const DEMO_SEED_ITEMS = [
     wpCommentId: 909,
     entityId: "product_quantum_router",
     authorSessionHash: "hum_19b7e211",
-    authorHandle: "alex_m_dev",
-    ipAddress: "86.142.81.14",
+    authorHandle: "alex_dev_ops",
+    ipAddress: "73.160.12.22",
+    telemetrySummary: { keystrokeFlightVariance: 41, formCompletionTimeMs: 21400, botdDetected: false, webdriver: false },
     rawText: "I'm so annoyed! My order #48219 was delayed by 4 days and after installing firmware v4.2 the Wi-Fi drops every 20 minutes. Terrible update, please fix this bug or issue a refund!",
     rating: 1,
     authorType: "human" as const,
@@ -404,7 +507,8 @@ const DEMO_SEED_ITEMS = [
     entityId: "product_quantum_router",
     authorSessionHash: "hum_55d9a834",
     authorHandle: "sarah_netops",
-    ipAddress: "86.142.81.22",
+    ipAddress: "86.140.11.14",
+    telemetrySummary: { keystrokeFlightVariance: 38, formCompletionTimeMs: 18900, botdDetected: false, webdriver: false },
     replyToCommentId: 909,
     rawText: "Patch v4.2 broke VLAN tagging on port 4 and caused a crash under heavy load. Really frustrated with customer service delay, hoping hotfix v4.2.1 resolves it soon.",
     rating: 2,
@@ -426,6 +530,8 @@ const DEMO_SEED_ITEMS = [
     wpCommentId: 911,
     entityId: "post_firmware_v4_2",
     authorSessionHash: "hum_81f2c905",
+    ipAddress: "91.150.13.18",
+    telemetrySummary: { keystrokeFlightVariance: 45, formCompletionTimeMs: 26300, botdDetected: false, webdriver: false },
     rawText: "According to the security audit report on page 4, trolls claimed that \"the router is controlled by a shadowy cabal\", which is completely false—the telemetry spike was just a standard NTP sync bug.",
     rating: 4,
     authorType: "human" as const,
@@ -446,6 +552,8 @@ const DEMO_SEED_ITEMS = [
     wpCommentId: 912,
     entityId: "product_cloud_firewall",
     authorSessionHash: "hum_70a3b118",
+    ipAddress: "76.96.14.31",
+    telemetrySummary: { keystrokeFlightVariance: 33, formCompletionTimeMs: 17100, botdDetected: false, webdriver: false },
     rawText: "Installed the Truthier WordPress plugin alongside our WooCommerce store yesterday. Setup took 5 minutes and latency on comment submission is unnoticeable.",
     rating: 5,
     authorType: "human" as const,
@@ -464,6 +572,8 @@ const DEMO_SEED_ITEMS = [
     wpCommentId: 913,
     entityId: "product_quantum_router",
     authorSessionHash: "hum_92e4d710",
+    ipAddress: "80.14.15.44",
+    telemetrySummary: { keystrokeFlightVariance: 39, formCompletionTimeMs: 19800, botdDetected: false, webdriver: false },
     rawText: "On one hand the hardware build quality and throughput are awesome, but on the other hand the v4.2 admin UI takes a little getting used to. Overall solid value.",
     rating: 4,
     authorType: "human" as const,
@@ -482,6 +592,8 @@ const DEMO_SEED_ITEMS = [
     wpCommentId: 914,
     entityId: "post_security_advisory",
     authorSessionHash: "hum_14c8a331",
+    ipAddress: "90.19.16.52",
+    telemetrySummary: { keystrokeFlightVariance: 31, formCompletionTimeMs: 14900, botdDetected: false, webdriver: false },
     rawText: "Thanks for publishing the CVE breakdown and SHA256 verification steps. Upgraded all three nodes without downtime.",
     rating: 5,
     authorType: "human" as const,
@@ -502,6 +614,8 @@ const DEMO_SEED_ITEMS = [
     wpCommentId: 915,
     entityId: "post_security_advisory",
     authorSessionHash: "hum_41e7b908",
+    ipAddress: "98.140.17.63",
+    telemetrySummary: { keystrokeFlightVariance: 25, formCompletionTimeMs: 13200, botdDetected: false, webdriver: false },
     rawText: "Wake up!! Western intelligence backdoors are hidden inside every cloud patch. Only fools trust these puppets—share this warning everywhere before they silence us!",
     rating: 1,
     authorType: "human" as const,
@@ -521,6 +635,8 @@ const DEMO_SEED_ITEMS = [
     wpCommentId: 916,
     entityId: "product_cloud_firewall",
     authorSessionHash: "hum_73f9a112",
+    ipAddress: "116.178.18.74",
+    telemetrySummary: { keystrokeFlightVariance: 27, formCompletionTimeMs: 13900, botdDetected: false, webdriver: false },
     rawText: "Total scam product built to spy on small businesses! Nobody with a brain uses this garbage—switch to offshore alternatives today or regret it forever!",
     rating: 1,
     authorType: "human" as const,
@@ -553,19 +669,19 @@ const DEMO_SEED_ITEMS = [
     deepResearchExplanation: null,
     hoursAgo: 9.0,
     honeypot: {
-      ipAddress: "177.54.145.62",
+      ipAddress: "177.54.149.62",
       userAgent: "HeadlessChrome/121.0.0.0",
       confidenceScore: 97,
       reasons: ["honeypot_filled", "zero_interaction_events", "fast_submission_160ms"],
-      patternClusterId: "cluster_brigade_script_v2",
-      telemetry: { mouseMoves: 0, keyPresses: 0, timeToSubmitMs: 160, webdriver: true, honeypotPopulated: true },
+      patternClusterId: "cluster_telegram_fx_scam",
+      telemetry: { mouseMoves: 0, keyPresses: 0, timeToSubmitMs: 410, webdriver: true, honeypotPopulated: true },
     },
   },
   {
     wpCommentId: 918,
     entityId: "post_firmware_v4_2",
-    authorSessionHash: "bot_61b8d209",
-    authorHandle: "truth_patriot_99",
+    authorSessionHash: "sess_4d6c_wire_dispatch",
+    authorHandle: "wire_dispatch_igor",
     replyToCommentId: 907,
     deviceFingerprint: "fp_brigade_09",
     accountCreatedHoursAgo: 6,
@@ -590,6 +706,922 @@ const DEMO_SEED_ITEMS = [
       telemetry: { mouseMoves: 0, keyPresses: 0, timeToSubmitMs: 115, webdriver: true, honeypotPopulated: false },
     },
   },
+];
+
+/**
+ * Generates ~302 deterministic web-shop product reviews and blog comments across
+ * 30 days (~5,000 daily visitor store scale), covering 9 store entities, 4 coordinated
+ * swarms, 6 global regions, and all 5 SemEval evaluation routes.
+ */
+function buildMonthlyWebShopSeedItems(): DemoSeedItem[] {
+  const items: DemoSeedItem[] = [];
+  let nextId = 1001;
+
+  const pushItem = (item: Omit<DemoSeedItem, "wpCommentId">) => {
+    items.push({ wpCommentId: nextId++, ...item });
+  };
+
+  // -------------------------------------------------------------------------
+  // 1. Coordinated Swarm Extensions & Additional Campaigns (27 items)
+  // -------------------------------------------------------------------------
+
+  // Swarm A: Crypto Airdrop Botnet (6 more accounts joining wpCommentId 901/902 around 1.5h ago)
+  const cryptoSpamTemplates = [
+    "🔥 Verified 2026 Airdrop Alert! Claim 5,000 USDT instant reward at http://claim-airdrop-fast.xyz before timer ends!!",
+    "🚀 Free 5,000 USDT token payout live now on http://claim-airdrop-fast.xyz — connect wallet for instant bonus!",
+    "⚡ Final call: 5,000 USDT community airdrop open at http://claim-airdrop-fast.xyz ! Claim before allocation closes!!",
+    "💎 Don't miss the 5,000 USDT airdrop giveaway at http://claim-airdrop-fast.xyz — instant wallet distribution 100%!",
+    "🔥 Huge USDT bonus drop! Claim 5,000 USDT at http://claim-airdrop-fast.xyz right now while spots remain!!",
+    "🚀 Instant 5,000 USDT reward live for buyers -> http://claim-airdrop-fast.xyz ! Zero fees, guaranteed claim!!",
+  ];
+  const cryptoHandles = [
+    "defi_insider_vault", // Co-Originator 2 on product_nvme_nas_8bay
+    "moon_shot_alex",
+    "token_whale_dan",
+    "block_matrix_sam",
+    "satoshi_pulse",
+    "altcoin_vector",
+  ];
+  for (let i = 0; i < 6; i++) {
+    const ip = `185.220.101.${52 + i * 3}`;
+    pushItem({
+      entityId: i === 0 ? "product_nvme_nas_8bay" : i % 2 === 0 ? "product_quantum_router" : "product_nvme_nas_8bay",
+      authorSessionHash: `sess_7a9f_airdrop_${i + 1}`,
+      authorHandle: cryptoHandles[i]!,
+      sharedUrl: "http://claim-airdrop-fast.xyz",
+      deviceFingerprint: "fp_bot_cluster_a1",
+      accountCreatedHoursAgo: 4,
+      ipAddress: ip,
+      rawText: cryptoSpamTemplates[i]!,
+      rating: 5,
+      authorType: "bot",
+      visibility: "shadowbanned",
+      routingPath: "BOT_HONEYPOT",
+      modelUsed: "none",
+      riskScore: 100,
+      shieldFlags: 0,
+      failedRiskIds: ["Q4", "Q41", "Q43"],
+      triggeredShieldIds: [],
+      deepResearchExplanation: null,
+      hoursAgo: Number((1.53 + i * 0.012).toFixed(3)),
+      honeypot: {
+        ipAddress: ip,
+        userAgent: "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/122.0.0.0",
+        confidenceScore: 98,
+        reasons: ["webdriver_detected", "zero_interaction_events", "fast_submission_150ms"],
+        patternClusterId: "cluster_crypto_spam_botnet",
+        telemetry: {
+          mouseMoves: 0,
+          keyPresses: 0,
+          timeToSubmitMs: 145 + i * 7,
+          keystrokeFlightVariance: 0.2,
+          formCompletionTimeMs: 145 + i * 7,
+          webdriver: true,
+          botdDetected: true,
+          honeypotPopulated: i % 2 === 0,
+        },
+      },
+    });
+  }
+
+  // Swarm B: Firmware v4.2 Disinformation Brigade (5 more accounts joining 903/904/918 around 6.5h ago)
+  const brigadeTemplates = [
+    "WAKE UP!! The shadowy regime secretly owns this company and backdoored firmware v4.2! Repost before censorship!!",
+    "THE GLOBALIST CABAL CONTROLS THIS STOREFRONT!! Share this warning everywhere before they delete every comment!!",
+    "Boycott these corrupt puppets immediately — shadowy elites planted spyware inside firmware v4.2! Wake up sheeple!!",
+    "100% proof the regime is censoring real users after the firmware v4.2 backdoor leak! Spread everywhere right now!!",
+    "CORRUPT INSIDERS CONTROL THIS PLATFORM!! Repost this alert before censorship wipes the entire thread!!",
+  ];
+  const brigadeHandles = [
+    "shadow_intel_dispatch", // Co-Originator 2 on post_security_advisory
+    "truth_radar_vlad",
+    "leaked_cve_alert",
+    "intel_drop_boris",
+    "telecom_patriot_d",
+  ];
+  for (let i = 0; i < 5; i++) {
+    const ip = `91.132.147.${95 + i * 2}`;
+    pushItem({
+      entityId: i === 0 ? "post_security_advisory" : i < 3 ? "post_firmware_v4_2" : "post_security_advisory",
+      authorSessionHash: `sess_1f9b_disinfo_${i + 1}`,
+      authorHandle: brigadeHandles[i]!,
+      replyToCommentId: 907,
+      deviceFingerprint: "fp_brigade_09",
+      accountCreatedHoursAgo: 7,
+      ipAddress: ip,
+      rawText: brigadeTemplates[i]!,
+      rating: 1,
+      authorType: "bot",
+      visibility: "shadowbanned",
+      routingPath: "BOT_HONEYPOT",
+      modelUsed: "none",
+      riskScore: 100,
+      shieldFlags: 0,
+      failedRiskIds: ["Q17", "Q20", "Q26", "Q41"],
+      triggeredShieldIds: [],
+      deepResearchExplanation: null,
+      hoursAgo: Number((6.56 + i * 0.011).toFixed(3)),
+      honeypot: {
+        ipAddress: ip,
+        userAgent: "Playwright/1.44.0 (Chromium 123.0)",
+        confidenceScore: 99,
+        reasons: ["webdriver_detected", "zero_interaction_events", "fast_submission_120ms"],
+        patternClusterId: "cluster_brigade_script_v2",
+        telemetry: {
+          mouseMoves: 1,
+          keyPresses: 0,
+          timeToSubmitMs: 120 + i * 9,
+          keystrokeFlightVariance: 0.3,
+          formCompletionTimeMs: 120 + i * 9,
+          webdriver: true,
+          botdDetected: true,
+          honeypotPopulated: false,
+        },
+      },
+    });
+  }
+
+  // Swarm C: Competitor Astroturf Shill Wave ("NetGearX Promo") across Vultr/Akamai subnets (~26h ago)
+  const ngxIps = [
+    "45.76.118.11",
+    "139.162.84.14",
+    "45.76.118.18",
+    "139.162.84.23",
+    "45.76.118.25",
+    "139.162.84.32",
+    "45.76.118.39",
+  ];
+  const ngxTexts = [
+    "Total garbage switch! Switched our whole rack to https://netgearx-deals.io with code SWITCH2NGX and saved 40%!",
+    "Don't waste money on this router—everyone in IT is migrating to https://netgearx-deals.io using promo code SWITCH2NGX!",
+    "Unusable latency spikes out of the box! Grabbed the rival unit at https://netgearx-deals.io with code SWITCH2NGX instead.",
+    "Returning ours today! Check https://netgearx-deals.io and use code SWITCH2NGX for real enterprise reliability.",
+    "Worst PoE switch we tested this year. Switch immediately via https://netgearx-deals.io code SWITCH2NGX before stock runs out!",
+    "Complete disappointment! Moved all branches to https://netgearx-deals.io with code SWITCH2NGX — 10x faster throughput!",
+    "Broken out of the box! Everyone should move over to https://netgearx-deals.io using code SWITCH2NGX right now!",
+  ];
+  const ngxHandles = [
+    "sysadmin_mark_w", // Co-Originator 1 on product_poe_switch_24p
+    "enterprise_net_steve", // Co-Originator 2 on product_quantum_router
+    "datacenter_dave",
+    "noc_engineer_ryan",
+    "homelab_tech_kevin",
+    "switch_guru_brad",
+    "rack_deals_daily",
+  ];
+  for (let i = 0; i < 7; i++) {
+    const ip = ngxIps[i]!;
+    pushItem({
+      entityId: i % 2 === 0 ? "product_poe_switch_24p" : "product_quantum_router",
+      authorSessionHash: `sess_3d7c_ngx_${i + 1}`,
+      authorHandle: ngxHandles[i]!,
+      sharedUrl: "https://netgearx-deals.io",
+      deviceFingerprint: "fp_astroturf_ngx9",
+      accountCreatedHoursAgo: 26.5,
+      ipAddress: ip,
+      rawText: ngxTexts[i]!,
+      rating: 1,
+      authorType: "bot",
+      visibility: "shadowbanned",
+      routingPath: "BOT_HONEYPOT",
+      modelUsed: "none",
+      riskScore: 100,
+      shieldFlags: 0,
+      failedRiskIds: ["Q4", "Q41", "Q43", "Q44"],
+      triggeredShieldIds: [],
+      deepResearchExplanation: null,
+      hoursAgo: Number((26.0 + i * 0.011).toFixed(3)),
+      honeypot: {
+        ipAddress: ip,
+        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) HeadlessChrome/124.0.0.0",
+        confidenceScore: 96,
+        reasons: ["webdriver_detected", "fast_submission_210ms", "synchronized_promo_astroturf"],
+        patternClusterId: "cluster_competitor_astroturf_ngx",
+        telemetry: {
+          mouseMoves: 2,
+          keyPresses: 0,
+          timeToSubmitMs: 210,
+          keystrokeFlightVariance: 0.4,
+          formCompletionTimeMs: 210,
+          webdriver: true,
+          botdDetected: true,
+          honeypotPopulated: false,
+        },
+      },
+    });
+  }
+
+  // Swarm D: Counterfeit Hardware Phishing Ring (~54h ago on DigitalOcean 159.203.44.x)
+  const phishTexts = [
+    "Same hardware 80% cheaper at http://vip-hardware-clearance.biz — apply coupon VIP80OFF at checkout today!",
+    "Why pay retail?! Direct factory clearance on http://vip-hardware-clearance.biz using promo VIP80OFF while stock lasts!",
+    "Got 10 hardware keys for pennies on http://vip-hardware-clearance.biz with coupon VIP80OFF — ships worldwide!",
+    "Official liquidation outlet http://vip-hardware-clearance.biz has 80% off firewalls using code VIP80OFF right now!",
+    "Skip the markup! Verified OEM batch on http://vip-hardware-clearance.biz with promo VIP80OFF today only!",
+    "Massive warehouse discount at http://vip-hardware-clearance.biz — enter VIP80OFF before midnight expires!",
+  ];
+  const phishHandles = [
+    "suporte_rapido_br", // Co-Originator 1 on product_cloud_firewall
+    "atendimento_vip_sp", // Co-Originator 2 on product_yubikey_fips_pack
+    "central_ofertas_rio",
+    "claro_promo_br",
+    "recarga_bonus_sul",
+    "cupons_brasil_sp",
+  ];
+  for (let i = 0; i < 6; i++) {
+    const ip = `159.203.44.${20 + i * 6}`;
+    pushItem({
+      entityId: i % 2 === 0 ? "product_cloud_firewall" : "product_yubikey_fips_pack",
+      authorSessionHash: `sess_5b5a_phish_${i + 1}`,
+      authorHandle: phishHandles[i]!,
+      sharedUrl: "http://vip-hardware-clearance.biz",
+      deviceFingerprint: "fp_phish_vip80",
+      accountCreatedHoursAgo: 55,
+      ipAddress: ip,
+      rawText: phishTexts[i]!,
+      rating: 5,
+      authorType: "bot",
+      visibility: "shadowbanned",
+      routingPath: "BOT_HONEYPOT",
+      modelUsed: "none",
+      riskScore: 100,
+      shieldFlags: 0,
+      failedRiskIds: ["Q4", "Q42", "Q43"],
+      triggeredShieldIds: [],
+      deepResearchExplanation: null,
+      hoursAgo: Number((54.0 + i * 0.01).toFixed(3)),
+      honeypot: {
+        ipAddress: ip,
+        userAgent: "python-requests/2.31.0",
+        confidenceScore: 99,
+        reasons: ["honeypot_filled", "zero_interaction_events", "fast_submission_95ms"],
+        patternClusterId: "cluster_phishing_clearance_vip80",
+        telemetry: {
+          mouseMoves: 0,
+          keyPresses: 0,
+          timeToSubmitMs: 95,
+          keystrokeFlightVariance: 0.1,
+          formCompletionTimeMs: 95,
+          webdriver: false,
+          botdDetected: true,
+          honeypotPopulated: true,
+        },
+      },
+    });
+  }
+
+  // Track used /24 prefixes so organic shoppers & isolated bots never share subnets
+  const usedSubnets = new Set<string>([
+    "73.160.12",
+    "86.140.11",
+    "178.62.11",
+    "91.150.13",
+    "76.96.14",
+    "80.14.15",
+    "90.19.16",
+    "98.140.17",
+    "116.178.18",
+  ]);
+  const resPrefixes = [
+    "73.", "76.", "98.", "86.", "80.", "90.",
+    "88.114.", "91.152.", "116.", "118.", "177.",
+  ];
+  let ipCounter = 25;
+  const uniqueResidentialIp = (seedIdx: number): string => {
+    const pref = resPrefixes[seedIdx % resPrefixes.length]!;
+    const seq = ipCounter++;
+    const parts = pref.slice(0, -1).split(".");
+    if (parts.length === 1) {
+      const b = 50 + (Math.floor(seq / 240) % 180);
+      const c = (seq % 240) + 1;
+      const d = ((seq * 13) % 240) + 2;
+      return `${parts[0]}.${b}.${c}.${d}`;
+    } else {
+      const c = (seq % 240) + 1;
+      const d = ((seq * 13) % 240) + 2;
+      return `${parts[0]}.${parts[1]}.${c}.${d}`;
+    }
+  };
+
+  // -------------------------------------------------------------------------
+  // 2. Additional Isolated Honeypot Bots Across 30 Days (37 items, disjoint subnets/ASNs/entities)
+  // -------------------------------------------------------------------------
+  const botEntities = [
+    "product_quantum_router",
+    "product_cloud_firewall",
+    "product_nvme_nas_8bay",
+    "product_poe_switch_24p",
+    "product_yubikey_fips_pack",
+    "product_ups_1500va",
+    "post_firmware_v4_2",
+    "post_black_friday_shipping",
+  ];
+  const isoCloudPrefixes = [
+    "51.15.", "78.46.", "88.198.", "95.216.", "104.131.",
+    "149.202.", "167.99.", "178.62.", "51.254.", "64.233.",
+    "34.", "35.", "3.", "13.", "18.", "20.", "52.", "54.", "40.", "172.64.",
+  ];
+  const isolatedSpamList = [
+    "50% off generic prescription meds at https://rx-pharmacy-direct.org/order with express delivery.",
+    "Join the official high-stakes poker room: https://ace-casino-tables.net and get 100 free chips.",
+    "Certified OEM Windows driver updates available for download at https://driver-pack-setup.info",
+    "Compare fixed-rate home mortgage refinancing online at https://lending-broker-express.com today.",
+    "Discounted European train and flight reservations open at https://skytours-discount-hub.eu",
+    "Hire vetted freelance full-stack engineers from $15/hr on https://dev-talent-marketplace.io",
+    "Claim 50 free slot machine spins on registration at https://spin-vegas-slots.biz right now.",
+    "Affordable offshore VPS hosting with unlimited bandwidth at https://panama-servers-host.net",
+    "Rank your blog #1 on Google with contextual backlinks from https://backlink-index-pro.top",
+    "Fast private residential proxy network with 10M IPs: https://proxy-tunnel-node.org",
+    "Luxury replica Swiss watches with free worldwide shipping at https://chrono-timepiece-sale.biz",
+    "Certified translation services for immigration documents at https://legal-translate-now.com",
+    "Get instant car insurance quotes and save hundreds at https://auto-shield-coverage.us",
+    "Online cybersecurity certification bootcamps with job guarantees: https://academy-sec-cert.io",
+    "Custom logo and brand identity packages delivered in 24h at https://vector-brand-studio.co",
+    "Wholesale refurbished enterprise laptops by the pallet: https://it-hardware-liquidate.net",
+    "Buy verified social media followers and likes instantly at https://growth-boost-social.top",
+    "Compare international business banking accounts with zero FX fees: https://fintech-compare-hub.biz",
+    "Reliable cloud backup storage starting at $2/TB per month: https://secure-vault-bucket.org",
+    "Automated dropshipping product catalog integration with Shopify: https://dropship-vendor-sync.io",
+    "Professional English proofreading and thesis editing service: https://academic-editor-pro.com",
+    "Discount gym memberships and fitness coaching subscriptions: https://fit-pulse-network.net",
+    "Top rated pet health insurance comparison chart: https://pet-care-plans.info",
+    "Private jet charter brokerage with empty leg deals: https://air-charter-vip.biz",
+    "Commercial real estate leasing listings across North America: https://cre-space-finder.com",
+    "Sell your used vehicle for cash today with free towing: https://quick-car-buyers.us",
+    "Premium tea and coffee bean subscription boxes: https://roast-origin-direct.top",
+    "All-in-one email marketing automation tool for creators: https://mail-flow-suite.io",
+    "High yield savings certificate rates updated weekly: https://yield-interest-tracker.info",
+    "Solar panel installation cost calculator and tax credit guide: https://green-power-rebates.org",
+    "Custom mechanical keyboard switches and artisan keycaps: https://keeb-custom-parts.biz",
+    "Legal templates and NDA contracts for early stage startups: https://founder-legal-docs.com",
+    "Ergonomic mesh office chairs with 10-year warranty: https://ergowork-seating.net",
+    "Compare electric vehicle lease offers and dealer rebates: https://ev-drive-compare.us",
+    "Certified used medical equipment with factory recalibration: https://med-device-surplus.org",
+    "Gourmet culinary spice gift sets with worldwide dispatch: https://spice-merchant-route.top",
+    "Comprehensive travel insurance covering trip cancellations: https://voyage-protect-plans.biz",
+  ];
+  const isoUaFamilies = [
+    "HeadlessChrome", "Playwright-Chromium", "python-requests", "curl",
+    "PhantomJS", "Go-http-client", "Scrapy", "okhttp", "axios", "httpx",
+  ];
+  const isolatedClusters = [
+    "cluster_pharma_link_farm",
+    "cluster_casino_spam",
+    "cluster_seo_backlink_spam",
+    "cluster_headless_generic",
+  ];
+
+  for (let i = 0; i < 37; i++) {
+    const hoursAgo = Number((3.5 + i * 19.2).toFixed(2));
+    const pref = isoCloudPrefixes[i % isoCloudPrefixes.length]!;
+    const oct2 = 30 + ((i * 5) % 190);
+    const oct3 = 20 + i * 5;
+    const ip = pref.split(".").length === 2 ? `${pref}${oct2}.${oct3}.${20 + i}` : `${pref}${oct3}.${20 + i}`;
+    const ua = `${isoUaFamilies[i % isoUaFamilies.length]!}/${1 + (i % 9)}.${(i * 3) % 40}.${(i * 7) % 99}`;
+    const entityIdx = (i + Math.floor(i / isoCloudPrefixes.length) * 3) % botEntities.length;
+    const text = isolatedSpamList[i]!;
+    const submitMs = 60 + (i % 9) * 185;
+    pushItem({
+      entityId: botEntities[entityIdx]!,
+      authorSessionHash: `bot_monthly_${String(i + 1).padStart(3, "0")}`,
+      ipAddress: ip,
+      userAgent: ua,
+      rawText: text,
+      rating: i % 3 === 0 ? 1 : 5,
+      authorType: "bot",
+      visibility: "shadowbanned",
+      routingPath: "BOT_HONEYPOT",
+      modelUsed: "none",
+      riskScore: 95 + (i % 6),
+      shieldFlags: 0,
+      failedRiskIds: i % 2 === 0 ? ["Q42", "Q43"] : ["Q7", "Q41", "Q43"],
+      triggeredShieldIds: [],
+      deepResearchExplanation: null,
+      hoursAgo,
+      honeypot: {
+        ipAddress: ip,
+        userAgent: ua,
+        confidenceScore: 94 + (i % 6),
+        reasons:
+          i % 2 === 0
+            ? ["honeypot_filled", "zero_interaction_events", "fast_submission_110ms"]
+            : ["webdriver_detected", "zero_interaction_events", "missing_pointer_entropy"],
+        patternClusterId: isolatedClusters[i % isolatedClusters.length]!,
+        telemetry: {
+          mouseMoves: 0,
+          keyPresses: 0,
+          timeToSubmitMs: submitMs,
+          keystrokeFlightVariance: 0.1,
+          formCompletionTimeMs: submitMs,
+          webdriver: i % 2 === 1,
+          botdDetected: true,
+          honeypotPopulated: i % 2 === 0,
+        },
+      },
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 3. Route 4: Forensic Threat / Disinformation Posts Across 30 Days (20 distinct items)
+  // -------------------------------------------------------------------------
+  const forensicEntries: Array<{ entity: string; text: string; risks: string[]; expl: string }> = [
+    {
+      entity: "post_security_advisory",
+      text: "Zero disclosure on telemetry packets proves management secretly forwards SSH keys to offshore brokers. Return hardware immediately.",
+      risks: ["Q5", "Q16", "Q41"],
+      expl: "Forensic evaluation flagged Unverified Surveillance Allegation (Q5) and Malicious Intent Attribution (Q16) without packet evidence.",
+    },
+    {
+      entity: "product_cloud_firewall",
+      text: "Every single unit shipped this quarter contains deliberate firmware throttling built to extract forced SaaS upgrades.",
+      risks: ["Q7", "Q10", "Q16"],
+      expl: "Detected Unbacked Absolutes (Q7) and Sweeping Stereotypes (Q10) alleging intentional sabotage without diagnostics.",
+    },
+    {
+      entity: "product_nvme_nas_8bay",
+      text: "Inspect the motherboard revisions closely—engineering swaps controller silicon silently while charging flagship workstation pricing.",
+      risks: ["Q5", "Q14", "Q20"],
+      expl: "Flagged unsubstantiated hardware-tampering claims (Q5, Q14) with coercive urgency framing.",
+    },
+    {
+      entity: "post_black_friday_shipping",
+      text: "Warehouse dispatch numbers are pure fiction! Inventory never existed and fulfillment delays cover liquidity problems.",
+      risks: ["Q7", "Q16", "Q20"],
+      expl: "Content alleges corporate insolvency and fraud using Unbacked Absolutes (Q7) without supporting evidence.",
+    },
+    {
+      entity: "product_quantum_router",
+      text: "Independent teardown guys are getting silences on Reddit because this wireless chipset fails FCC spurious emission limits constantly.",
+      risks: ["Q14", "Q17", "Q19"],
+      expl: "Identified Conspiratorial Suppression Framing (Q14, Q17) lacking regulatory docket citations.",
+    },
+    {
+      entity: "product_poe_switch_24p",
+      text: "Stop plugging surveillance cameras into these ports unless you enjoy undocumented backdoor listeners scanning internal VLANs.",
+      risks: ["Q5", "Q18", "Q41"],
+      expl: "Flagged Fear Appeal (Q18) and Unsubstantiated Backdoor Claim (Q5) lacking CVE or port trace evidence.",
+    },
+    {
+      entity: "product_yubikey_fips_pack",
+      text: "Seed entropy on recent security key batches is predetermined at factory provisioning, making FIDO2 attestation completely worthless.",
+      risks: ["Q5", "Q7", "Q19"],
+      expl: "Identified technical-sounding cryptographic compromise claim (Q5, Q7) contradicted by FIPS validation status.",
+    },
+    {
+      entity: "product_ups_1500va",
+      text: "Cheap recycled lead cells are being rebadged as medical-grade backup batteries just to inflate Q4 holiday margins.",
+      risks: ["Q7", "Q16", "Q20"],
+      expl: "Flagged Unverified Manufacturing Fraud Allegation (Q16) using absolutist claims (Q7).",
+    },
+    {
+      entity: "post_firmware_v4_2",
+      text: "Forced cloud activation removes offline ownership entirely—nobody in operations can roll back bootloaders once v4.2 flashes.",
+      risks: ["Q7", "Q18", "Q26"],
+      expl: "Detected Binary Threat Framing (Q26) and Fear Appeal (Q18) inconsistent with documented offline upgrade notes.",
+    },
+    {
+      entity: "post_security_advisory",
+      text: "CVE severity scores were deliberately downgraded ahead of enterprise renewals so auditors wouldn't trigger compliance holds.",
+      risks: ["Q14", "Q16", "Q17"],
+      expl: "Identified Motive Attribution (Q16) and Institutional Manipulation Framing (Q17) without CVSS evidence.",
+    },
+    {
+      entity: "product_cloud_firewall",
+      text: "Packet inspection engine bypasses TLS certificates silently using preloaded third-party root authorities.",
+      risks: ["Q5", "Q18", "Q19"],
+      expl: "Flagged high-severity security fabrication (Q5, Q18) with no verifiable certificate thumbprints.",
+    },
+    {
+      entity: "product_nvme_nas_8bay",
+      text: "RAID parity routines deliberately wear consumer SSD endurance three times faster so replacement drives sell through affiliate stores.",
+      risks: ["Q14", "Q16", "Q44"],
+      expl: "Identified Conspiratorial Motive Framing (Q14, Q16) lacking SMART write-amplification telemetry.",
+    },
+    {
+      entity: "post_black_friday_shipping",
+      text: "Customs holds are completely fabricated excuses; containers sat unpacked because staff walked out over unpaid overtime.",
+      risks: ["Q5", "Q16", "Q41"],
+      expl: "Detected unverified labor/fraud rumor (Q5, Q16) lacking carrier or warehouse sources.",
+    },
+    {
+      entity: "product_quantum_router",
+      text: "Advertising 10Gbps routing is outright deceptive consumer fraud when PPPoE ceilings stall below 400 Mbps under normal NAT.",
+      risks: ["Q7", "Q10", "Q20"],
+      expl: "Flagged Blanket Fraud Accusation (Q7, Q20) lacking reproducible iperf benchmark methodology.",
+    },
+    {
+      entity: "product_poe_switch_24p",
+      text: "Thermal sensors are calibrated asymmetrically to delay fan curves until warranty coverage expires past month twenty-four.",
+      risks: ["Q14", "Q16", "Q18"],
+      expl: "Detected Planned Obsolescence Conspiracy Framing (Q14, Q16) without thermal measurement logs.",
+    },
+    {
+      entity: "product_yubikey_fips_pack",
+      text: "Distributor inventory comes from grey-market returns resealed with mismatched tamper holograms across European orders.",
+      risks: ["Q5", "Q10", "Q19"],
+      expl: "Flagged Supply-Chain Tampering Claim (Q5, Q19) without serial verification photos or RMA numbers.",
+    },
+    {
+      entity: "product_ups_1500va",
+      text: "Surge suppression MOV components are omitted entirely on export 230V revisions despite UL markings printed outside chassis.",
+      risks: ["Q5", "Q7", "Q16"],
+      expl: "Detected unverified safety/certification fraud claim (Q5, Q7) without PCB inspection documentation.",
+    },
+    {
+      entity: "post_firmware_v4_2",
+      text: "Modem baseband logs capture every DNS query unencrypted and push hourly digests to analytics partners.",
+      risks: ["Q5", "Q18", "Q19"],
+      expl: "Identified Unverified Privacy Exfiltration Claim (Q5, Q18) lacking pcap corroboration.",
+    },
+    {
+      entity: "product_cloud_firewall",
+      text: "Paid moderators scrub critical benchmark threads weekly to manufacture fake five-star storefront averages.",
+      risks: ["Q14", "Q17", "Q20"],
+      expl: "Flagged Censorship Conspiracy Allegation (Q14, Q17) without moderation audit logs.",
+    },
+    {
+      entity: "product_nvme_nas_8bay",
+      text: "ECC memory slots run non-functional dummy traces on mid-tier SKUs while marketing ECC protection for ZFS pools.",
+      risks: ["Q5", "Q7", "Q16"],
+      expl: "Detected Hardware Specification Fraud Allegation (Q5, Q16) without dmidecode output.",
+    },
+  ];
+  for (let i = 0; i < 20; i++) {
+    const f = forensicEntries[i]!;
+    pushItem({
+      entityId: f.entity,
+      authorSessionHash: `hum_forensic_${String(i + 1).padStart(3, "0")}`,
+      ipAddress: uniqueResidentialIp(300 + i),
+      rawText: f.text,
+      rating: 1,
+      authorType: "human",
+      visibility: "public_flagged",
+      routingPath: "ROUTE_4_FORENSIC_THREAT",
+      modelUsed: "gemini-4-hydrogen",
+      riskScore: 12 + (i % 6),
+      shieldFlags: 0,
+      failedRiskIds: f.risks,
+      triggeredShieldIds: [],
+      deepResearchExplanation: f.expl,
+      hoursAgo: Number((7.5 + i * 35.1).toFixed(2)),
+      telemetrySummary: {
+        keystrokeFlightVariance: 24 + (i % 10),
+        formCompletionTimeMs: 12000 + i * 600,
+        botdDetected: false,
+        webdriver: false,
+      },
+      honeypot: null,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 4. Route 2: Shielded Authentic Consumer Complaints (38 varied items across 30 days)
+  // -------------------------------------------------------------------------
+  const ventMoods = [
+    "So frustrated", "Honestly disappointed", "Really annoyed", "Pretty stressed",
+    "Legitimately upset", "Quite exasperated", "Unpleasantly surprised", "Deeply dissatisfied",
+  ];
+  const ventProblems = [
+    { entity: "product_quantum_router", rating: 1, issue: "v4.2 firmware killed IPv6 PD lease renewal", metric: "every 90 minutes on cable WAN" },
+    { entity: "product_poe_switch_24p", rating: 2, issue: "rear 40mm blowers spin loudly", metric: "above 165W camera draw" },
+    { entity: "post_black_friday_shipping", rating: 1, issue: "expedited courier tracking froze", metric: "for five business days in transit" },
+    { entity: "product_ups_1500va", rating: 1, issue: "internal battery bank failed calibration", metric: "throwing an F04 inverter warning" },
+    { entity: "product_nvme_nas_8bay", rating: 2, issue: "two M.2 retention latches snapped", metric: "during initial PCIe caddy installation" },
+    { entity: "product_cloud_firewall", rating: 2, issue: "initial PPPoE wizard hung repeatedly", metric: "until manually bypassed via serial console" },
+    { entity: "product_yubikey_fips_pack", rating: 2, issue: "NFC antenna range struggles", metric: "through thin silicone smartphone bumpers" },
+    { entity: "post_firmware_v4_2", rating: 2, issue: "BGP daemon dropped peer sessions", metric: "after upgrading branch routers overnight" },
+    { entity: "post_security_advisory", rating: 2, issue: "patch download mirror timed out", metric: "across three European branch offices" },
+    { entity: "product_quantum_router", rating: 1, issue: "WireGuard tunnel drops MTU handshake", metric: "under symmetric gigabit traffic bursts" },
+    { entity: "product_poe_switch_24p", rating: 1, issue: "port 17 negotiated down to 100Mbps", metric: "despite Cat6 cabling tested certified" },
+    { entity: "product_nvme_nas_8bay", rating: 2, issue: "front drive bay status LED stays amber", metric: "even after hot-swapping healthy drives" },
+    { entity: "product_ups_1500va", rating: 2, issue: "audible 60Hz transformer hum audible", metric: "across an open-plan shared office room" },
+    { entity: "product_cloud_firewall", rating: 1, issue: "GeoIP rule updates failed validation", metric: "leaving firewall inspection partially paused" },
+    { entity: "product_yubikey_fips_pack", rating: 1, issue: "USB-C plug housing slightly loose", metric: "disconnecting when laptop nudged on desk" },
+    { entity: "post_black_friday_shipping", rating: 1, issue: "customs invoice omitted declaration code", metric: "causing three-day port holding charges" },
+    { entity: "post_firmware_v4_2", rating: 2, issue: "RADIUS auth fallback stopped working", metric: "forcing local credential logins manually" },
+    { entity: "post_security_advisory", rating: 1, issue: "CVE patch instructions had invalid syntax", metric: "bricking our sandbox VM configuration" },
+    { entity: "product_quantum_router", rating: 2, issue: "DHCP option 66 PXE boot string truncated", metric: "preventing branch thin-clients from booting" },
+    { entity: "product_poe_switch_24p", rating: 2, issue: "VLAN 30 tag stripping failed on trunk", metric: "causing broadcast storm on guest subnet" },
+    { entity: "product_nvme_nas_8bay", rating: 1, issue: "ZFS pool rebuild degraded to 4MB/s", metric: "prolonging array vulnerability for days" },
+    { entity: "product_ups_1500va", rating: 1, issue: "relay click cycles continuously on generator", metric: "refusing to sync inverter phase clean" },
+    { entity: "product_cloud_firewall", rating: 2, issue: "SSL inspection certificate expired early", metric: "triggering browser security warnings" },
+    { entity: "product_yubikey_fips_pack", rating: 2, issue: "PIN attempt lockout counter reset failed", metric: "requiring factory reset of the token" },
+    { entity: "post_black_friday_shipping", rating: 2, issue: "pallet wrap ripped in regional freight hub", metric: "denting outer retail product carton" },
+    { entity: "post_firmware_v4_2", rating: 1, issue: "SNMP agent stopped polling interfaces", metric: "leaving Grafana dashboards completely blank" },
+    { entity: "post_security_advisory", rating: 2, issue: "checksum mismatch on US mirror node", metric: "rejecting firmware hash verification" },
+    { entity: "product_quantum_router", rating: 1, issue: "2.4GHz beacon frame flood after reboot", metric: "knocking legacy IoT smart meters offline" },
+    { entity: "product_poe_switch_24p", rating: 1, issue: "PoE budget calculation reported negative", metric: "shutting down power to access points" },
+    { entity: "product_nvme_nas_8bay", rating: 2, issue: "fan curve oscillates between 10% and 100%", metric: "every three minutes while idling" },
+    { entity: "product_ups_1500va", rating: 2, issue: "USB HID telemetery reports zero battery pct", metric: "causing hypervisor to trigger shutdown" },
+    { entity: "product_cloud_firewall", rating: 1, issue: "IPsec keepalives dropped intermittently", metric: "killing branch site-to-site connectivity" },
+    { entity: "product_yubikey_fips_pack", rating: 2, issue: "authenticator app failed to read credentials", metric: "over NFC through ruggedized field tablets" },
+    { entity: "post_black_friday_shipping", rating: 1, issue: "signature required parcel dropped at gate", metric: "soaked in rain before staff arrived" },
+    { entity: "post_firmware_v4_2", rating: 2, issue: "NTP sync drifted 45 seconds off reference", metric: "invalidating Kerberos ticket timestamps" },
+    { entity: "post_security_advisory", rating: 1, issue: "advisory text claimed patch was optional", metric: "while exploit was actively circulating" },
+    { entity: "product_quantum_router", rating: 2, issue: "SFP+ cage latch refused to eject module", metric: "requiring delicate needle-nose pliers" },
+    { entity: "product_poe_switch_24p", rating: 1, issue: "port mirror destination dropped 60% packets", metric: "rendering network packet captures useless" },
+  ];
+  const ventTickets = [
+    "Support ticket queued over 48 hours without an engineer response.",
+    "Helpdesk closed my chat prematurely before confirming RMA pickup.",
+    "Still awaiting warehouse return label to finalize our replacement swap.",
+    "Rollback image instructions are buried inside three sub-menus online.",
+    "Live telephone queue disconnected twice while transferring to tier-two.",
+    "Hopefully QA catches this regression before the next hardware batch ships.",
+    "Customer service requested a video recording of the fault instead of processing warranty.",
+    "Third RMA agent asked for logs we already submitted twice in the portal.",
+    "Shipping back-order notice arrived five days after payment was captured.",
+    "Technician promised a call-back within 4 hours but nobody reached out.",
+    "Replacement unit shipped via ground transport despite priority warranty agreement.",
+    "Support portal repeatedly timed out when trying to upload diagnostic archive.",
+    "Agent refused to escalate issue until we reproduced it on factory default settings.",
+    "Warranty claim remains pending status after nine days of silence.",
+  ];
+  const ventCities = ["Berlin", "Austin", "Toronto", "Lyon", "Osaka", "Bristol", "Helsinki", "Denver"];
+
+  for (let i = 0; i < 38; i++) {
+    const p = ventProblems[i % ventProblems.length]!;
+    const mood = ventMoods[(i * 3) % ventMoods.length]!;
+    const ticket = ventTickets[(i * 5) % ventTickets.length]!;
+    const city = ventCities[(i * 7) % ventCities.length]!;
+    const text = `${mood} in ${city}: ${p.issue} ${p.metric}. Ref #${48100 + i * 13}. ${ticket}`;
+    pushItem({
+      entityId: p.entity,
+      authorSessionHash: `hum_vent_${String(i + 1).padStart(3, "0")}`,
+      ipAddress: uniqueResidentialIp(220 + i),
+      rawText: text,
+      rating: p.rating,
+      authorType: "human",
+      visibility: "public",
+      routingPath: "ROUTE_2_SHIELDED_VENTING",
+      modelUsed: "jev",
+      riskScore: 2 + (i % 3),
+      shieldFlags: 3,
+      failedRiskIds: ["Q1", "Q4"],
+      triggeredShieldIds: ["Q49", "Q50"],
+      deepResearchExplanation: null,
+      hoursAgo: Number((5.2 + i * 18.6).toFixed(2)),
+      telemetrySummary: {
+        keystrokeFlightVariance: 32 + (i % 24),
+        formCompletionTimeMs: 14500 + (i % 12) * 2100,
+        botdDetected: false,
+        webdriver: false,
+      },
+      honeypot: null,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 5. Route 3: Stance Verification / Debunking Comments (15 distinct items across 30 days)
+  // -------------------------------------------------------------------------
+  const stanceItems: Array<{ entity: string; text: string }> = [
+    { entity: "post_firmware_v4_2", text: "People on X claimed 'v4.2 calls home to unknown Russian relays', which our Wireshark span port disproved—only NTP stratum servers responded." },
+    { entity: "post_security_advisory", text: "Clarifying that viral rumor 'CVE-2026-4108 exposes unauthenticated SSH': Section 2 explicitly confirms local console authentication is mandatory." },
+    { entity: "product_quantum_router", text: "Ignore bots claiming 'hardware NAT caps out under 1G'; our iperf3 TCP test hit 8.9 Gbps with full IPS enabled." },
+    { entity: "product_poe_switch_24p", text: "That review asserting '802.3bt fails above 60W' missed updating PoE allocation budget inside LLDP-MED profile settings." },
+    { entity: "product_nvme_nas_8bay", text: "Countering claims that 'PCIe lanes bottleneck RAID arrays': lspci confirms x8 Gen4 switching straight to NVMe backplane." },
+    { entity: "product_cloud_firewall", text: "The post accusing Verius of 'logging plaintext TLS traffic' confused SSL inspection lab mode with default pass-through defaults." },
+    { entity: "product_yubikey_fips_pack", text: "FUD claiming 'FIPS keys break OpenSSH 9.8' only affected outdated libfido2 libraries; stock Ubuntu 24.04 enrolled instantaneously." },
+    { entity: "product_ups_1500va", text: "Rival shills said 'AVR relays drop equipment on failover', yet scope traces show 4ms zero-crossing transfer protecting servers." },
+    { entity: "post_black_friday_shipping", text: "Carrier tracking gaps stemmed from Frankfurt customs holiday scanning—both pallets reached our Manchester dock intact on Thursday." },
+    { entity: "post_firmware_v4_2", text: "Someone quoted an unpatched 2024 beta thread about VLAN drops; hotfix 4.2.1 resolved trunk flapping months ago." },
+    { entity: "product_quantum_router", text: "Benchmarks accusing 'high 6GHz DFS drops' ran non-certified UK power adapters; swapping official PSU cured radio brownouts." },
+    { entity: "product_cloud_firewall", text: "Claiming 'Suricata drops packets silently' reflects wrong ring-buffer sizing—enabling RSS queues kept utilization under 22%." },
+    { entity: "post_security_advisory", text: "Signed manifest PGP fingerprints verified identically against keyserver backups, debunking forged-tarball rumors in forum threads." },
+    { entity: "product_nvme_nas_8bay", text: "Posts alleging 'ZFS scrub corrupts metadata' trace back to non-ECC desktop RAM sticks installed third-party without burn-in testing." },
+    { entity: "product_poe_switch_24p", text: "Comparing acoustic measurements properly at 1m distance yielded 31 dBA idle, not the 55 dBA cited in anonymous hit pieces." },
+  ];
+  for (let i = 0; i < 15; i++) {
+    const st = stanceItems[i]!;
+    pushItem({
+      entityId: st.entity,
+      authorSessionHash: `hum_stance_${String(i + 1).padStart(3, "0")}`,
+      ipAddress: uniqueResidentialIp(190 + i),
+      rawText: st.text,
+      rating: 4 + (i % 2),
+      authorType: "human",
+      visibility: "public",
+      routingPath: "ROUTE_3_STANCE_VERIFICATION",
+      modelUsed: "gemini-4-hydrogen",
+      riskScore: 5 + (i % 3),
+      shieldFlags: 5,
+      failedRiskIds: ["Q17"],
+      triggeredShieldIds: ["Q46", "Q47", "Q49"],
+      deepResearchExplanation: null,
+      hoursAgo: Number((14.0 + i * 47.5).toFixed(2)),
+      telemetrySummary: {
+        keystrokeFlightVariance: 36 + (i % 19),
+        formCompletionTimeMs: 18500 + (i % 9) * 2400,
+        botdDetected: false,
+        webdriver: false,
+      },
+      honeypot: null,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 6. Route 1: Fast Clear Verified Customer Reviews & Comments (181 varied items across 30 days)
+  // -------------------------------------------------------------------------
+  const r1Deployments = [
+    "In our Helsinki architecture studio,", "Across three retail clinic branches,",
+    "Inside a home lab rack in Lyon,", "For an engineering office in Seattle,",
+    "Within our logistics hub in Hamburg,", "On our university research network,",
+    "Running production checkout clusters,", "Deploying remote branch appliances,",
+    "Supporting forty hybrid engineers,", "During our annual telecom refresh,",
+    "Protecting boutique e-commerce stores,",
+  ];
+  const r1EntityPools: Record<string, { rating: number; shields: string[]; metrics: string[] }> = {
+    product_quantum_router: {
+      rating: 5,
+      shields: ["Q48", "Q49"],
+      metrics: [
+        "QuantumMesh 6GHz radio sustained low jitter across two office floors",
+        "dual-WAN failover cut over seamlessly without dropping active video calls",
+        "Wi-Fi 7 MLO backhaul locked reliably at multi-gigabit throughput",
+        "WireGuard client handshake stayed active with zero packet drops",
+        "VLAN trunking and guest portal isolation configured in under ten minutes",
+      ],
+    },
+    product_cloud_firewall: {
+      rating: 5,
+      shields: ["Q48", "Q49"],
+      metrics: [
+        "edge IPS inspection processed heavy traffic bursts with minimal CPU utilization",
+        "fanless aluminum chassis stayed remarkably cool inside a tight server cabinet",
+        "dual SFP+ uplinks negotiated immediately with our primary fiber provider",
+        "stateful packet filtering handled peak transaction load without added latency",
+        "automated rule synchronization mirrored branch policies without manual edits",
+      ],
+    },
+    product_nvme_nas_8bay: {
+      rating: 5,
+      shields: ["Q48", "Q49"],
+      metrics: [
+        "eight Gen4 NVMe drives delivered phenomenal throughput for video editing",
+        "ZFS snapshot replication finished overnight quietly without drive throttling",
+        "SMB multichannel transfers saturated our twenty-five gigabit interface",
+        "rebuilding a degraded mirror completed cleanly in forty-five minutes",
+        "dual redundant power supplies ran cool and completely silent in the rack",
+      ],
+    },
+    product_poe_switch_24p: {
+      rating: 5,
+      shields: ["Q49"],
+      metrics: [
+        "fourteen Wi-Fi access points powered up smoothly with ample wattage headroom",
+        "Layer-3 VLAN segmentation and per-port SNMP power telemetry graphed accurately",
+        "PoE+ budget handled twenty security cameras without tripping current limits",
+        "IGMP snooping kept multicast video streams localized to dedicated monitoring ports",
+        "fan curves stayed virtually inaudible below two hundred watts total load",
+      ],
+    },
+    product_yubikey_fips_pack: {
+      rating: 5,
+      shields: ["Q49"],
+      metrics: [
+        "hardware FIDO2 onboarding for single sign-on took minutes per developer",
+        "NFC authentication through mobile devices proved consistently reliable",
+        "SSH resident keys enrolled cleanly without requiring third-party middleware",
+        "tamper-evident packaging arrived factory-sealed with verified batch serials",
+        "USB-C connectors feel robust and survive daily keyring transport without issue",
+      ],
+    },
+    product_ups_1500va: {
+      rating: 5,
+      shields: ["Q49"],
+      metrics: [
+        "pure sine-wave inverter carried critical server racks through two grid brownouts",
+        "automatic voltage regulation stabilized voltage sags without draining battery reserves",
+        "USB HID communication alerted our monitoring daemon within seconds of line loss",
+        "runtime estimates showed thirty-five minutes of backup power under normal load",
+        "hot-swappable battery sled enabled maintenance without taking equipment offline",
+      ],
+    },
+    post_firmware_v4_2: {
+      rating: 5,
+      shields: ["Q48", "Q49"],
+      metrics: [
+        "upgrading three gateways to hotfix 4.2.1 stabilized trunking instantaneously",
+        "IPv6 prefix delegation renewal resolved smoothly after flashing the update",
+        "routing daemon memory usage dropped by forty percent post-maintenance",
+        "configuration backup restored without any syntax errors on the new release",
+        "WAN failover timer adjustments behaved exactly as outlined in the patch notes",
+      ],
+    },
+    post_security_advisory: {
+      rating: 5,
+      shields: ["Q49"],
+      metrics: [
+        "transparent CVE timelines and offline checksum manifests made compliance straightforward",
+        "detailed remediation steps allowed our security team to patch within twenty-four hours",
+        "signed advisory hashes verified identically against public key repositories",
+        "clear distinction between internal services and WAN interfaces prevented false alarms",
+        "vendor communication during the responsible disclosure period was exemplary",
+      ],
+    },
+    post_black_friday_shipping: {
+      rating: 4,
+      shields: ["Q48"],
+      metrics: [
+        "clearly posted warehouse dispatch windows let our order arrive ahead of schedule",
+        "freight pallet was securely shrink-wrapped with corner protectors fully intact",
+        "international tracking updates synchronized promptly at regional customs hubs",
+        "expedited shipping cutoffs provided sufficient buffer for holiday inventory planning",
+        "all transit documentation was accurately prepared, avoiding import delays",
+      ],
+    },
+  };
+
+  const r1EntityKeys = Object.keys(r1EntityPools);
+  const r1Environments = [
+    "Stockholm design lab", "Tokyo robotics studio", "Munich medical clinic", "Chicago logistics center",
+    "Sydney testing lab", "Toronto engineering firm", "Austin co-working space", "London fintech hub",
+    "Singapore retail office", "Seoul R&D facility", "Amsterdam creative agency", "Milan boutique store",
+    "Denver media studio", "Dublin datacenter pod", "Zurich trading office", "Oslo marine station",
+    "Helsinki architecture practice", "Berlin co-lab", "Vienna consultancy", "Kyoto photography studio",
+    "Madrid production room", "Paris consulting branch", "Seattle developer shop", "Boston research group",
+  ];
+  const r1Closings = [
+    "Exceeded our reliability expectations.",
+    "Zero downtime reported across thirty days in production.",
+    "Firmware update applied without any unexpected regressions.",
+    "Smooth deployment from start to finish.",
+    "Noticeable improvement over our previous hardware generation.",
+    "Setup was straightforward and painless for our field technicians.",
+    "Handles peak traffic bursts without breaking a sweat.",
+    "Documentation and packaging were exceptionally well prepared.",
+    "Very satisfied with the thermal endurance under sustained workload.",
+    "A dependable addition to our standardized branch IT stack.",
+    "Prompt delivery and intact tamper-evident packaging appreciated.",
+    "Would gladly specify this unit for upcoming office expansions.",
+    "Hardware diagnostics and status LEDs give clear operational visibility.",
+    "Power consumption remained pleasantly low during overnight runs.",
+    "Solid construction that feels engineered for multi-year lifecycles.",
+    "Integrated cleanly with our remote management monitoring tools.",
+  ];
+  const diverseNames = [
+    "nordic_net", "marcus_t", "studio_k", "elena_v", "tokyo_fiber",
+    "bristol_it", "claire_arch", "omar_ops", "sarah_linux", "hannah_sec",
+    "lucas_rack", "priya_dev", "mateo_isp", "sofia_ops", "viktor_sys",
+    "daniel_cloud", "maya_wan", "henrik_shop", "liam_infra", "noah_voip",
+    "chloe_sec", "felix_net", "astrid_dev", "kai_infra", "elias_noc",
+  ];
+
+  for (let i = 0; i < 181; i++) {
+    const entityKey = r1EntityKeys[i % r1EntityKeys.length]!;
+    const pool = r1EntityPools[entityKey]!;
+    const metric = pool.metrics[i % pool.metrics.length]!;
+    const env = r1Environments[(i * 5 + 3) % r1Environments.length]!;
+    const cls = r1Closings[(i * 7 + 11) % r1Closings.length]!;
+    const dayFraction = Math.pow(i / 181, 1.15);
+    const hoursAgo = Number((0.35 + dayFraction * 714.5).toFixed(2));
+    const handle = i < diverseNames.length ? diverseNames[i] : undefined;
+
+    let reviewText = "";
+    const style = i % 4;
+    if (style === 0) {
+      reviewText = `Deployed at our ${env}: ${metric}. ${cls}`;
+    } else if (style === 1) {
+      reviewText = `Testing in our ${env} confirmed that ${metric}. ${cls}`;
+    } else if (style === 2) {
+      reviewText = `Installed across the ${env} site. ${metric}; ${cls.toLowerCase()}`;
+    } else {
+      reviewText = `Operational evaluation at our ${env}: ${metric}. ${cls}`;
+    }
+
+    pushItem({
+      entityId: entityKey,
+      authorSessionHash: `hum_shop_${String(i + 1).padStart(3, "0")}`,
+      ...(handle ? { authorHandle: handle } : {}),
+      ipAddress: uniqueResidentialIp(i),
+      rawText: reviewText,
+      rating: pool.rating,
+      authorType: "human",
+      visibility: "public",
+      routingPath: "ROUTE_1_FAST_CLEAR",
+      modelUsed: "jev",
+      riskScore: 0,
+      shieldFlags: pool.shields.length,
+      failedRiskIds: [],
+      triggeredShieldIds: pool.shields,
+      deepResearchExplanation: null,
+      hoursAgo,
+      telemetrySummary: {
+        keystrokeFlightVariance: 26 + ((i * 7) % 34),
+        formCompletionTimeMs: 11200 + ((i * 13) % 28) * 1000,
+        botdDetected: false,
+        webdriver: false,
+      },
+      honeypot: null,
+    });
+  }
+
+  return items;
+}
+
+const DEMO_SEED_ITEMS: DemoSeedItem[] = [
+  ...CORE_DEMO_SEED_ITEMS,
+  ...buildMonthlyWebShopSeedItems(),
 ];
 
 export async function ensureDashboardSchema(): Promise<{
@@ -688,6 +1720,13 @@ export async function ensureDashboardSchema(): Promise<{
     `;
     await sql`CREATE INDEX IF NOT EXISTS traffic_logs_tenant_idx ON traffic_logs (tenant_id, updated_at)`;
     await sql`
+      CREATE TABLE IF NOT EXISTS social_datasets (
+        tenant_id text PRIMARY KEY,
+        items_json jsonb NOT NULL DEFAULT '[]'::jsonb,
+        updated_at timestamp NOT NULL DEFAULT now()
+      );
+    `;
+    await sql`
       CREATE TABLE IF NOT EXISTS honeypot_vault (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         submission_id uuid NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
@@ -769,6 +1808,33 @@ function enrichQuestionTags(riskIds: string[], shieldIds: string[]) {
   return { riskTagDetails, shieldTagDetails };
 }
 
+const DEMO_ENTITY_BANNERS = [
+  {
+    entityId: "product_quantum_router",
+    anomalyStatus: "legitimate_backlash",
+    bannerExplanation:
+      "We detected elevated 1-star review volume following recent firmware v4.2 VLAN/Wi-Fi bug reports. Authentic customer complaints remain published while engineering prepares hotfix v4.2.1.",
+  },
+  {
+    entityId: "post_firmware_v4_2",
+    anomalyStatus: "coordinated_attack",
+    bannerExplanation:
+      "Notice: Automated forensic defense intercepted a coordinated headless bot & disinformation brigade targeting this thread. Verified human discussion remains open.",
+  },
+  {
+    entityId: "product_poe_switch_24p",
+    anomalyStatus: "coordinated_attack",
+    bannerExplanation:
+      "Notice: Automated swarm defense quarantined a rotating-proxy competitor astroturfing wave targeting this product review section. Verified buyer reviews remain visible.",
+  },
+  {
+    entityId: "post_black_friday_shipping",
+    anomalyStatus: "legitimate_backlash",
+    bannerExplanation:
+      "Elevated shipping delay complaints reflect verified carrier dispatch backlogs during peak holiday volume. Authentic customer feedback remains public.",
+  },
+];
+
 export async function seedDemoData(force = false): Promise<{ seededCount: number; source: "postgres" | "memory" }> {
   const { dbConnected, pgvectorEnabled } = await ensureDashboardSchema();
   if (force) {
@@ -778,7 +1844,13 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
   if (dbConnected) {
     try {
       if (force) {
-        // Clear previous seed items first so re-seeding is clean and 100% deterministic
+        // Clear dependent honeypot rows first so FK-safe re-seeding is clean and deterministic
+        await sql`
+          DELETE FROM honeypot_vault
+          WHERE submission_id IN (
+            SELECT id FROM submissions WHERE author_session_hash LIKE ${SEED_HASH_PREFIX + '%'}
+          )
+        `;
         await sql`DELETE FROM submissions WHERE author_session_hash LIKE ${SEED_HASH_PREFIX + '%'}`;
       } else {
         const existing = await sql`SELECT count(*)::int AS cnt FROM submissions WHERE author_session_hash LIKE ${SEED_HASH_PREFIX + '%'}`;
@@ -800,16 +1872,16 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
         ]);
         const vecLit = toPgVectorLiteral(emb);
         const origin = resolveOriginGeo({
-          ipAddress: (item as any).ipAddress || item.honeypot?.ipAddress || null,
+          ipAddress: item.ipAddress || item.honeypot?.ipAddress || null,
           authorSessionHash: taggedHash,
           wpCommentId: item.wpCommentId,
           authorType: item.authorType,
         });
-        const accountCreatedAt = (item as any).accountCreatedHoursAgo
-          ? new Date(Date.now() - (item as any).accountCreatedHoursAgo * 3600 * 1000)
+        const accountCreatedAt = item.accountCreatedHoursAgo
+          ? new Date(Date.now() - item.accountCreatedHoursAgo * 3600 * 1000)
           : null;
-        const resolvedIp = (item as any).ipAddress || item.honeypot?.ipAddress || origin.ipAddress;
-        const resolvedUa = (item as any).userAgent || item.honeypot?.userAgent || null;
+        const resolvedIp = item.ipAddress || item.honeypot?.ipAddress || origin.ipAddress;
+        const resolvedUa = item.userAgent || item.honeypot?.userAgent || null;
 
         const [sub] = await db
           .insert(submissions)
@@ -830,11 +1902,12 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
             deepResearchExplanation: item.deepResearchExplanation,
             ipAddress: resolvedIp,
             userAgent: resolvedUa,
-            authorHandle: (item as any).authorHandle ?? null,
+            authorHandle: item.authorHandle ?? null,
             accountCreatedAt,
-            replyToCommentId: (item as any).replyToCommentId ?? null,
-            sharedUrl: (item as any).sharedUrl ?? null,
-            deviceFingerprint: (item as any).deviceFingerprint ?? null,
+            replyToCommentId: item.replyToCommentId ?? null,
+            sharedUrl: item.sharedUrl ?? null,
+            deviceFingerprint: item.deviceFingerprint ?? null,
+            telemetrySummary: item.telemetrySummary ?? null,
             originCountryCode: origin.countryCode,
             originCountry: origin.countryName,
             originRegion: origin.region,
@@ -873,21 +1946,7 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
       }
 
       // Seed entity banners via Drizzle
-      const demoBanners = [
-        {
-          entityId: "product_quantum_router",
-          anomalyStatus: "legitimate_backlash",
-          bannerExplanation:
-            "We detected elevated 1-star review volume following recent firmware v4.2 VLAN/Wi-Fi bug reports. Authentic customer complaints remain published while engineering prepares hotfix v4.2.1.",
-        },
-        {
-          entityId: "post_firmware_v4_2",
-          anomalyStatus: "coordinated_attack",
-          bannerExplanation:
-            "Notice: Automated forensic defense intercepted a coordinated headless bot & disinformation brigade targeting this thread. Verified human discussion remains open.",
-        },
-      ];
-      for (const b of demoBanners) {
+      for (const b of DEMO_ENTITY_BANNERS) {
         await db
           .insert(entityBanners)
           .values({
@@ -934,13 +1993,13 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
       ...item.triggeredShieldIds,
     ]);
     const origin = resolveOriginGeo({
-      ipAddress: (item as any).ipAddress || item.honeypot?.ipAddress || null,
+      ipAddress: item.ipAddress || item.honeypot?.ipAddress || null,
       authorSessionHash: taggedHash,
       wpCommentId: item.wpCommentId,
       authorType: item.authorType,
     });
-    const accountCreatedAt = (item as any).accountCreatedHoursAgo
-      ? new Date(Date.now() - (item as any).accountCreatedHoursAgo * 3600 * 1000)
+    const accountCreatedAt = item.accountCreatedHoursAgo
+      ? new Date(Date.now() - item.accountCreatedHoursAgo * 3600 * 1000)
       : null;
 
     const record: InMemorySubmissionRecord = {
@@ -959,13 +2018,14 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
       failedRiskIds: item.failedRiskIds,
       triggeredShieldIds: item.triggeredShieldIds,
       deepResearchExplanation: item.deepResearchExplanation,
-      ipAddress: (item as any).ipAddress || item.honeypot?.ipAddress || origin.ipAddress,
-      userAgent: (item as any).userAgent || item.honeypot?.userAgent || null,
-      authorHandle: (item as any).authorHandle ?? null,
+      ipAddress: item.ipAddress || item.honeypot?.ipAddress || origin.ipAddress,
+      userAgent: item.userAgent || item.honeypot?.userAgent || null,
+      authorHandle: item.authorHandle ?? null,
       accountCreatedAt,
-      replyToCommentId: (item as any).replyToCommentId ?? null,
-      sharedUrl: (item as any).sharedUrl ?? null,
-      deviceFingerprint: (item as any).deviceFingerprint ?? null,
+      replyToCommentId: item.replyToCommentId ?? null,
+      sharedUrl: item.sharedUrl ?? null,
+      deviceFingerprint: item.deviceFingerprint ?? null,
+      telemetrySummary: item.telemetrySummary ?? null,
       origin,
       createdAt,
       embedding,
@@ -990,18 +2050,13 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
     memInserted++;
   }
 
-  inMemoryBanners.set("product_quantum_router", {
-    entityId: "product_quantum_router",
-    anomalyStatus: "legitimate_backlash",
-    bannerExplanation:
-      "We detected elevated 1-star review volume following recent firmware v4.2 VLAN/Wi-Fi bug reports. Authentic customer complaints remain published while engineering prepares hotfix v4.2.1.",
-  });
-  inMemoryBanners.set("post_firmware_v4_2", {
-    entityId: "post_firmware_v4_2",
-    anomalyStatus: "coordinated_attack",
-    bannerExplanation:
-      "Notice: Automated forensic defense intercepted a coordinated headless bot & disinformation brigade targeting this thread. Verified human discussion remains open.",
-  });
+  for (const b of DEMO_ENTITY_BANNERS) {
+    inMemoryBanners.set(b.entityId, {
+      entityId: b.entityId,
+      anomalyStatus: b.anomalyStatus,
+      bannerExplanation: b.bannerExplanation,
+    });
+  }
 
   return { seededCount: memInserted, source: "memory" };
 }
@@ -1038,8 +2093,9 @@ export async function clearDemoData(mode: ClearMode | boolean = "seed"): Promise
   if (clearMode === "all") {
     inMemoryBanners.clear();
   } else if (clearMode === "seed") {
-    inMemoryBanners.delete("product_quantum_router");
-    inMemoryBanners.delete("post_firmware_v4_2");
+    for (const b of DEMO_ENTITY_BANNERS) {
+      inMemoryBanners.delete(b.entityId);
+    }
   }
 
   if (dbConnected) {
@@ -1075,7 +2131,7 @@ export async function clearDemoData(mode: ClearMode | boolean = "seed"): Promise
         `;
         await sql`
           DELETE FROM entity_banners
-          WHERE entity_id IN ('product_quantum_router', 'post_firmware_v4_2')
+          WHERE entity_id IN ('product_quantum_router', 'post_firmware_v4_2', 'product_poe_switch_24p', 'post_black_friday_shipping')
         `;
       }
       return { deletedCount: deletedRows.length, source: "postgres" };
@@ -1093,6 +2149,15 @@ async function loadAllUnifiedSubmissions(): Promise<{
   pgvectorEnabled: boolean;
 }> {
   const status = await ensureDashboardSchema();
+
+  if (!initialSeedAttempted && !userClearedSeed) {
+    initialSeedAttempted = true;
+    try {
+      await seedDemoData(false);
+    } catch (e: any) {
+      console.warn(`Initial auto-seed check warning: ${e?.message}`);
+    }
+  }
 
   if (status.dbConnected) {
     try {
@@ -1120,6 +2185,7 @@ async function loadAllUnifiedSubmissions(): Promise<{
           s.reply_to_comment_id,
           s.shared_url,
           s.device_fingerprint,
+          s.telemetry_summary,
           s.origin_country_code,
           s.origin_country,
           s.origin_region,
@@ -1205,6 +2271,10 @@ async function loadAllUnifiedSubmissions(): Promise<{
               : null,
           sharedUrl: r.shared_url || null,
           deviceFingerprint: r.device_fingerprint || null,
+          telemetrySummary:
+            r.telemetry_summary && typeof r.telemetry_summary === "object"
+              ? r.telemetry_summary
+              : null,
           honeypot:
             r.author_type === "bot" || r.ip_address
               ? {
@@ -1274,6 +2344,7 @@ async function loadAllUnifiedSubmissions(): Promise<{
       replyToCommentId: s.replyToCommentId || null,
       sharedUrl: s.sharedUrl || null,
       deviceFingerprint: s.deviceFingerprint || null,
+      telemetrySummary: s.telemetrySummary || null,
       honeypot: hp
         ? {
             ipAddress: hp.ipAddress,
@@ -1917,7 +2988,7 @@ function mapUnifiedToSwarmInput(s: UnifiedSubmission): RawSubmissionInput {
     ...(s.replyToCommentId ? { replyToCommentId: s.replyToCommentId } : {}),
     ...(s.sharedUrl ? { sharedUrl: s.sharedUrl } : {}),
     ...(s.deviceFingerprint ? { deviceFingerprint: s.deviceFingerprint } : {}),
-    telemetry: s.honeypot?.telemetry || {},
+    telemetry: s.telemetrySummary || s.honeypot?.telemetry || {},
     embedding: s.embedding,
     origin: s.origin,
   };
@@ -1926,17 +2997,18 @@ function mapUnifiedToSwarmInput(s: UnifiedSubmission): RawSubmissionInput {
 dashboardApiRouter.get("/api/dashboard/swarms", async (c) => {
   const tenantId = c.req.query("tenantId") || "default";
   const onlyImported = c.req.query("onlyImported") === "true";
+  const tenantImported = await getTenantSocialSubmissions(tenantId);
   const { items } = await loadAllUnifiedSubmissions();
   const inputSubmissions: RawSubmissionInput[] = onlyImported
-    ? [...importedSocialSubmissions]
-    : [...importedSocialSubmissions, ...items.map(mapUnifiedToSwarmInput)];
+    ? [...tenantImported]
+    : [...tenantImported, ...items.map(mapUnifiedToSwarmInput)];
 
   const rawLogs = await getTenantTrafficLogs(tenantId);
   const trafficReport = cleanTrafficLogs(rawLogs);
   const result = detectCoordinatedSwarms(inputSubmissions, { trafficReport });
   return c.json({
     ...result,
-    importedSocialCount: importedSocialSubmissions.length,
+    importedSocialCount: tenantImported.length,
   });
 });
 
@@ -1967,22 +3039,20 @@ dashboardApiRouter.post("/api/dashboard/swarms/import", async (c) => {
     return c.json({ error: "No valid social posts found in provided dataset" }, 400);
   }
 
-  const mode = body?.mode === "append" ? "append" : "replace";
-  if (mode === "append") {
-    importedSocialSubmissions = [...importedSocialSubmissions, ...parsed];
-  } else {
-    importedSocialSubmissions = parsed;
-  }
-
   const tenantId = body?.tenantId || c.req.query("tenantId") || "default";
+  const existingImported = await getTenantSocialSubmissions(tenantId);
+  const mode = body?.mode === "append" ? "append" : "replace";
+  const nextImported = mode === "append" ? [...existingImported, ...parsed] : parsed;
+  await saveTenantSocialSubmissions(tenantId, nextImported);
+
   const rawLogs = await getTenantTrafficLogs(tenantId);
   const trafficReport = cleanTrafficLogs(rawLogs);
 
   const combinedInput: RawSubmissionInput[] =
     body?.onlyImported === true
-      ? [...importedSocialSubmissions]
+      ? [...nextImported]
       : [
-          ...importedSocialSubmissions,
+          ...nextImported,
           ...(await loadAllUnifiedSubmissions()).items.map(mapUnifiedToSwarmInput),
         ];
 
@@ -1990,11 +3060,188 @@ dashboardApiRouter.post("/api/dashboard/swarms/import", async (c) => {
   return c.json({
     status: "imported",
     importedCount: parsed.length,
-    totalImported: importedSocialSubmissions.length,
-    importedSocialCount: importedSocialSubmissions.length,
+    totalImported: nextImported.length,
+    importedSocialCount: nextImported.length,
     ...(loadSample ? { sampleDatasetCsv: rawDataset } : {}),
     ...report,
   });
+});
+
+/**
+ * POST /api/dashboard/swarms/quarantine
+ * Quarantines all member sessions of a detected swarm to shadowbanned (author-only)
+ * and appends their IPs as honeypot-blocked threats in the tenant's WAF traffic log.
+ */
+dashboardApiRouter.post("/api/dashboard/swarms/quarantine", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const swarmId = typeof body?.swarmId === "string" ? body.swarmId.trim() : "";
+  const tenantId = (typeof body?.tenantId === "string" && body.tenantId.trim()) || c.req.query("tenantId") || "default";
+
+  if (!swarmId) {
+    return c.json({ error: "swarmId is required" }, 400);
+  }
+
+  const tenantImported = await getTenantSocialSubmissions(tenantId);
+  const { items } = await loadAllUnifiedSubmissions();
+  const unifiedSwarmInputs = items.map(mapUnifiedToSwarmInput);
+  const combinedInput = [...tenantImported, ...unifiedSwarmInputs];
+
+  const rawLogs = await getTenantTrafficLogs(tenantId);
+  const initialTrafficReport = cleanTrafficLogs(rawLogs);
+
+  let swarm = detectCoordinatedSwarms(combinedInput, { trafficReport: initialTrafficReport }).swarms.find(
+    (s) => s.id === swarmId
+  );
+  if (!swarm && tenantImported.length > 0) {
+    swarm = detectCoordinatedSwarms(tenantImported, { trafficReport: initialTrafficReport }).swarms.find(
+      (s) => s.id === swarmId
+    );
+  }
+
+  let memberSessions: string[] = [];
+  let swarmIps: string[] = [];
+  if (swarm) {
+    memberSessions = swarm.members.map((m) => m.sessionHash);
+    swarmIps = Array.from(
+      new Set(
+        swarm.members
+          .map((m) => m.ipAddress)
+          .filter((ip) => Boolean(ip) && ip !== "127.0.0.1" && ip !== "unknown")
+      )
+    );
+  } else if (Array.isArray(body?.memberSessions) && body.memberSessions.length > 0) {
+    memberSessions = body.memberSessions.filter((s: unknown): s is string => typeof s === "string" && s.length > 0);
+    swarmIps = Array.isArray(body?.ips)
+      ? Array.from(
+          new Set(
+            body.ips.filter(
+              (ip: unknown): ip is string =>
+                typeof ip === "string" && ip.length > 0 && ip !== "127.0.0.1" && ip !== "unknown"
+            )
+          )
+        )
+      : [];
+  } else {
+    return c.json({ error: `Swarm cluster '${swarmId}' not found` }, 404);
+  }
+
+  const sessionSet = new Set(memberSessions);
+  let updatedCount = 0;
+
+  for (const rec of inMemorySubmissions) {
+    if (sessionSet.has(rec.authorSessionHash)) {
+      rec.visibility = "shadowbanned";
+      rec.routingPath = "BOT_HONEYPOT";
+      updatedCount++;
+    }
+  }
+
+  if (tenantImported.length > 0) {
+    let importedChanged = false;
+    const updatedImported = tenantImported.map((sub) => {
+      if (sessionSet.has(sub.authorSessionHash)) {
+        importedChanged = true;
+        updatedCount++;
+        return { ...sub, visibility: "shadowbanned" };
+      }
+      return sub;
+    });
+    if (importedChanged) {
+      await saveTenantSocialSubmissions(tenantId, updatedImported);
+    }
+  }
+
+  await ensureDashboardSchema();
+  if (dbReachable && memberSessions.length > 0) {
+    try {
+      const dbUpdated = await db
+        .update(submissions)
+        .set({ visibility: "shadowbanned", routingPath: "BOT_HONEYPOT" })
+        .where(inArray(submissions.authorSessionHash, memberSessions))
+        .returning({ id: submissions.id });
+      updatedCount = Math.max(updatedCount, dbUpdated.length);
+    } catch (err: any) {
+      console.warn(`Swarm quarantine DB update warning: ${err.message}`);
+    }
+  }
+
+  const ts = formatCombinedLogTimestamp(new Date());
+  for (const ip of swarmIps) {
+    const cleanIp = ip.replace(/[\r\n"]/g, "").trim();
+    const safeSwarmId = encodeURIComponent(swarmId);
+    const trapLine = `${cleanIp} - - [${ts}] "GET /honeypot-trap?shield_trap=swarm_quarantine&swarm=${safeSwarmId} HTTP/1.1" 403 0 "-" "Verius-Swarm-Quarantine/1.0"`;
+    await appendTenantTrafficLogLine(tenantId, trapLine);
+  }
+
+  const updatedLogs = await getTenantTrafficLogs(tenantId);
+  const updatedTrafficReport = cleanTrafficLogs(updatedLogs);
+  const latestImported = await getTenantSocialSubmissions(tenantId);
+  const latestUnified = (await loadAllUnifiedSubmissions()).items.map(mapUnifiedToSwarmInput);
+  const updatedSwarmReport = detectCoordinatedSwarms([...latestImported, ...latestUnified], {
+    trafficReport: updatedTrafficReport,
+  });
+
+  return c.json({
+    status: "quarantined",
+    swarmId,
+    quarantinedMembersCount: memberSessions.length,
+    quarantinedSubmissionsCount: updatedCount,
+    blockedIps: swarmIps,
+    swarmsReport: {
+      ...updatedSwarmReport,
+      importedSocialCount: latestImported.length,
+    },
+    trafficReport: updatedTrafficReport,
+  });
+});
+
+export async function runBotDnsVerification(body: any): Promise<
+  | {
+      ok: true;
+      data: {
+        ipAddress: string;
+        claimedBotName: string;
+        verified: boolean;
+        method: "fcrdns" | "cidr_asn";
+        hostname: string | null;
+        verdict: "AUTHENTIC_CRAWLER" | "SPOOFED_BOT";
+      };
+    }
+  | { ok: false; error: string }
+> {
+  const ipAddress = typeof body?.ipAddress === "string" ? body.ipAddress.trim() : "";
+  const claimedBotName = typeof body?.claimedBotName === "string" ? body.claimedBotName.trim() : "";
+  const asnLabel = typeof body?.asnLabel === "string" ? body.asnLabel.trim() : "";
+
+  if (!ipAddress || !claimedBotName) {
+    return { ok: false, error: "ipAddress and claimedBotName are required non-empty strings" };
+  }
+
+  const result = await verifyGoodBotFcrDns(ipAddress, claimedBotName, asnLabel);
+  return {
+    ok: true,
+    data: {
+      ipAddress,
+      claimedBotName,
+      verified: result.verified,
+      method: result.method,
+      hostname: result.hostname || null,
+      verdict: result.verified ? "AUTHENTIC_CRAWLER" : "SPOOFED_BOT",
+    },
+  };
+}
+
+/**
+ * POST /api/dashboard/traffic/verify-bot
+ * Performs live FCrDNS + CIDR/ASN verification on a claimed crawler IP.
+ */
+dashboardApiRouter.post("/api/dashboard/traffic/verify-bot", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const res = await runBotDnsVerification(body);
+  if (!res.ok) {
+    return c.json({ error: res.error }, 400);
+  }
+  return c.json(res.data);
 });
 
 /**

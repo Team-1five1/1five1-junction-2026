@@ -51,6 +51,12 @@ export const trafficLogs = pgTable("traffic_logs", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const socialDatasets = pgTable("social_datasets", {
+  tenantId: text("tenant_id").primaryKey(),
+  itemsJson: jsonb("items_json").$type<Array<Record<string, unknown>>>().default([]).notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export const honeypotVault = pgTable("honeypot_vault", {
   id: uuid("id").defaultRandom().primaryKey(),
   submissionId: uuid("submission_id").references(() => submissions.id).notNull(),

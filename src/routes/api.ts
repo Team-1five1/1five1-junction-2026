@@ -24,7 +24,11 @@ import {
   detectCoordinatedSwarms,
   parseSocialDataset,
 } from "../engines/coordination-detector";
-import { appendTenantTrafficLogLine } from "./dashboard-api";
+import {
+  appendTenantTrafficLogLine,
+  formatCombinedLogTimestamp,
+  runBotDnsVerification,
+} from "./dashboard-api";
 import { ProviderHttpError } from "../ai/provider-errors";
 
 export const apiRouter = new Hono<{ Variables: { tenant: typeof tenants.$inferSelect } }>();
@@ -42,7 +46,7 @@ const ingestSchema = z.object({
   deviceFingerprint: z.string().max(500).nullable().optional(),
 });
 
-apiRouter.use("/v1/*", bodyLimit({ maxSize: 128 * 1024 }));
+apiRouter.use("/v1/*", bodyLimit({ maxSize: 1024 * 1024 }));
 apiRouter.use("/v1/*", async (c, next) => {
   const path = c.req.path;
   if (path === "/v1/honeypot/vault" || path === "/v1/honeypot/reset") {
@@ -154,6 +158,15 @@ apiRouter.post("/v1/traffic/clean", async (c) => {
   return c.json(report);
 });
 
+apiRouter.post("/v1/traffic/verify-bot", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const res = await runBotDnsVerification(body);
+  if (!res.ok) {
+    return c.json({ error: res.error }, 400);
+  }
+  return c.json(res.data);
+});
+
 const trafficEventSchema = z.object({
   ipAddress: z.string().max(100).optional(),
   method: z.string().max(16).optional(),
@@ -162,12 +175,6 @@ const trafficEventSchema = z.object({
   userAgent: z.string().max(1000).optional(),
   username: z.string().max(200).optional(),
 });
-
-function formatCombinedLogTimestamp(date: Date): string {
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(date.getUTCDate())}/${months[date.getUTCMonth()]}/${date.getUTCFullYear()}:${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} +0000`;
-}
 
 apiRouter.post("/v1/traffic/event", async (c) => {
   const body = await c.req.json().catch(() => null);
