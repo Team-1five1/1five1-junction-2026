@@ -16,6 +16,8 @@ class Shield_Admin {
     private function __construct() {
         add_action('admin_menu', array($this, 'add_admin_menu'));
         add_action('admin_init', array($this, 'register_settings'));
+        add_filter('manage_edit-comments_columns', array($this, 'add_comments_columns'));
+        add_action('manage_comments_custom_column', array($this, 'render_comments_column'), 10, 2);
     }
 
     public function add_admin_menu() {
@@ -30,6 +32,69 @@ class Shield_Admin {
 
     public function register_settings() {
         register_setting('shield_guard_settings_group', 'shield_guard_settings', array($this, 'sanitize_settings'));
+    }
+
+    public function add_comments_columns($columns) {
+        $new_columns = array();
+        foreach ($columns as $key => $title) {
+            $new_columns[$key] = $title;
+            if ($key === 'comment') {
+                $new_columns['shield_status'] = '🛡️ Verius Status';
+            }
+        }
+        if (!isset($new_columns['shield_status'])) {
+            $new_columns['shield_status'] = '🛡️ Verius Status';
+        }
+        return $new_columns;
+    }
+
+    public function render_comments_column($column, $comment_id) {
+        if ($column !== 'shield_status') {
+            return;
+        }
+
+        $visibility = get_comment_meta($comment_id, '_shield_visibility', true);
+        if (!$visibility) {
+            echo '<span style="color:#6b7280; font-size:12px;">Unmanaged</span>';
+            return;
+        }
+
+        $failed_ids_raw = get_comment_meta($comment_id, '_shield_failed_ids', true);
+        $failed_ids = !empty($failed_ids_raw) ? json_decode($failed_ids_raw, true) : array();
+        $model = get_comment_meta($comment_id, '_shield_model_used', true);
+        $explanation = get_comment_meta($comment_id, '_shield_explanation', true);
+
+        switch ($visibility) {
+            case 'public':
+                echo '<span style="display:inline-block; padding:2px 8px; border-radius:12px; font-size:11px; font-weight:600; background:#dcfce7; color:#15803d; border:1px solid #bbf7d0;">✓ Cleared</span>';
+                if ($model && $model !== 'none') {
+                    echo '<div style="font-size:11px; color:#6b7280; margin-top:3px;">' . esc_html($model) . '</div>';
+                }
+                break;
+
+            case 'public_flagged':
+                echo '<span style="display:inline-block; padding:2px 8px; border-radius:12px; font-size:11px; font-weight:600; background:#fef3c7; color:#b45309; border:1px solid #fde68a;">⚠ Flagged</span>';
+                if (!empty($failed_ids) && is_array($failed_ids)) {
+                    echo '<div style="font-size:11px; font-family:monospace; color:#92400e; margin-top:3px;">' . esc_html(implode(', ', array_slice($failed_ids, 0, 4))) . (count($failed_ids) > 4 ? '…' : '') . '</div>';
+                }
+                if ($explanation) {
+                    echo '<div style="font-size:11px; color:#4b5563; margin-top:3px; max-width:260px; line-height:1.3;" title="' . esc_attr($explanation) . '">' . esc_html(wp_trim_words($explanation, 12, '…')) . '</div>';
+                }
+                break;
+
+            case 'shadowbanned':
+                echo '<span style="display:inline-block; padding:2px 8px; border-radius:12px; font-size:11px; font-weight:600; background:#fee2e2; color:#b91c1c; border:1px solid #fecaca;">🤖 Bot / Shadowbanned</span>';
+                echo '<div style="font-size:11px; color:#991b1b; margin-top:3px;">Author-only (Honeypot)</div>';
+                break;
+
+            case 'pending':
+                echo '<span style="display:inline-block; padding:2px 8px; border-radius:12px; font-size:11px; font-weight:600; background:#f3f4f6; color:#4b5563; border:1px solid #e5e7eb;">⏳ Evaluating…</span>';
+                break;
+
+            default:
+                echo '<span style="font-size:12px; color:#6b7280;">' . esc_html(ucfirst($visibility)) . '</span>';
+                break;
+        }
     }
 
     public function sanitize_settings($input) {

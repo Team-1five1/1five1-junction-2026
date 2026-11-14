@@ -73,7 +73,6 @@ class Shield_Interceptor {
         $entity_title = $post ? $post->post_title : 'Post #' . $post_id;
 
         $options = get_option('shield_guard_settings', array());
-        $api_url = !empty($options['api_url']) ? rtrim($options['api_url'], '/') : 'http://127.0.0.1:4000';
         $api_key = !empty($options['api_key']) ? $options['api_key'] : 'default_tenant';
         $mode = !empty($options['threshold_mode']) ? $options['threshold_mode'] : 'balanced';
 
@@ -101,6 +100,15 @@ class Shield_Interceptor {
         $options = get_option('shield_guard_settings', array());
         $api_url = !empty($options['api_url']) ? rtrim($options['api_url'], '/') : 'http://127.0.0.1:4000';
         $api_key = isset($options['api_key']) ? $options['api_key'] : '';
+
+        // Ensure payload has the latest tenant key if options were updated since insert
+        $payload = json_decode($payload_json, true);
+        if (is_array($payload) && !empty($api_key) && (empty($payload['tenantApiKey']) || $payload['tenantApiKey'] !== $api_key)) {
+            $payload['tenantApiKey'] = $api_key;
+            $payload_json = wp_json_encode($payload);
+            update_comment_meta($comment_id, '_shield_ingest_payload', wp_slash($payload_json));
+        }
+
         $response = wp_remote_post($api_url . '/v1/ingest', array(
             'method'      => 'POST',
             'blocking'    => true, // Wait for durable acceptance, never for AI analysis.
