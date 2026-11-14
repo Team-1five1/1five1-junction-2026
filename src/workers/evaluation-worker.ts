@@ -1,454 +1,257 @@
-import { Queue, Worker, type Job } from "bullmq";
+import { Queue, Worker, DelayedError, type Job } from "bullmq";
 import Redis from "ioredis";
-import { createHmac } from "crypto";
-import { db } from "../db";
-import { submissions, honeypotVault, entityBanners, tenants } from "../db/schema";
-import { eq } from "drizzle-orm";
+import { createHmac } from "node:crypto";
+import { and, eq, gte, isNull, or, asc, lt, lte, sql as expression } from "drizzle-orm";
+import { db, sql } from "../db";
+import { evaluationJobs, submissions, honeypotVault, entityBanners, tenants } from "../db/schema";
 import { screenWithJev } from "../ai/jev-screener";
 import { evaluateSemEvalBitmask, type ThresholdMode } from "../engines/semeval-scorer";
-import { verifyStanceOrForensic, investigateReviewBombing } from "../ai/hydrogen-research";
+import { verifyStanceOrForensic, investigateReviewBombing } from "../ai/grounded-research";
+import { detectReviewSpike } from "../engines/review-velocity";
 import type { BotEvaluationResult } from "../engines/bot-telemetry";
+import { honeypotPatternId } from "../engines/honeypot-patterns";
 import { debugLog, debugDecision } from "../config/logger";
+import { researchModel } from "../ai/web-grounding";
+import type { ForensicResult } from "../ai/grounded-research";
+import { ProviderHttpError } from "../ai/provider-errors";
+import { retryDelay, MAX_JOB_FAILURES } from "./retry-policy";
 
 export interface EvaluationJobData {
-  wpCommentId: number;
-  entityId: string;
-  entityTitle?: string;
-  authorSessionHash: string;
-  rawText: string;
-  rating?: number | null;
-  botResult: BotEvaluationResult;
-  ipAddress: string;
-  userAgent: string;
-  tenantApiKey?: string;
-  wpWebhookUrl?: string;
-  thresholdMode?: ThresholdMode;
+  tenantId: string; wpCommentId: number; entityId: string; entityTitle?: string;
+  authorSessionHash: string; rawText: string; rating?: number | null;
+  botResult: BotEvaluationResult; ipAddress: string; userAgent: string;
+  thresholdMode: ThresholdMode;
 }
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+let queue: Queue | null = null;
+let worker: Worker | null = null;
+let connection: Redis | null = null;
+let timer: ReturnType<typeof setInterval> | undefined;
 
-let redisConnection: Redis | null = null;
-let evaluationQueue: Queue<EvaluationJobData> | null = null;
+export function evaluationQueueName() { return process.env.EVALUATION_QUEUE_NAME || "shield-evaluation-v2"; }
 
-export const inMemoryBanners = new Map<string, { entityId: string; anomalyStatus: string; bannerExplanation: string | null }>();
-const inMemoryReviewTracker = new Map<string, Array<{ rating: number; text: string; createdAt: Date }>>();
-
-function getRedisConnection(): Redis {
-  if (!redisConnection) {
-    redisConnection = new Redis(REDIS_URL, {
-      maxRetriesPerRequest: null,
-      enableReadyCheck: false,
-      lazyConnect: true,
-      retryStrategy(times) {
-        if (times > 5) return null;
-        return Math.min(times * 100, 2000);
-      },
+function redis() {
+  if (!connection) {
+    connection = new Redis(process.env.REDIS_URL || "redis://127.0.0.1:6379", {
+      maxRetriesPerRequest: null, connectTimeout: 2000,
     });
-    redisConnection.on("error", (err) => {
-      console.warn(`Redis connection warning: ${err.message}`);
-    });
+    connection.on("error", () => {});
   }
-  return redisConnection;
+  return connection;
 }
 
-export function getEvaluationQueue(): Queue<EvaluationJobData> | null {
-  try {
-    if (!evaluationQueue) {
-      const conn = getRedisConnection();
-      evaluationQueue = new Queue<EvaluationJobData>("shield-evaluation", {
-        connection: conn,
-      });
-    }
-    return evaluationQueue;
-  } catch (err: any) {
-    console.warn(`Failed to initialize BullMQ queue: ${err.message}`);
-    return null;
-  }
+export function getEvaluationQueue() {
+  return queue;
 }
 
-/**
- * Dispatches webhook back to WordPress with HMAC SHA256 signature.
- */
-export async function sendWordPressWebhook(
-  targetUrl: string,
-  payload: Record<string, any>,
-  secret = process.env.WP_WEBHOOK_SECRET || "shield_shared_secret"
-): Promise<boolean> {
-  const hasBanner = !!payload.banner;
-  debugLog("Webhook", `Dispatching webhook to ${targetUrl}`, {
-    commentId: payload.wpCommentId,
-    visibility: payload.visibility,
-    authorType: payload.authorType,
-    modelUsed: payload.modelUsed || "none",
-    hasBanner,
-    bannerStatus: payload.banner?.anomalyStatus || null,
+export function isQueueReady() { return connection?.status === "ready" && !!worker?.isRunning(); }
+export async function checkQueueHealth() {
+  if (!isQueueReady()) return false;
+  return await connection!.ping() === "PONG";
+}
+
+export async function sendWordPressWebhook(targetUrl: string, payload: Record<string, any>, secret: string): Promise<void> {
+  const body = JSON.stringify(payload);
+  const signature = createHmac("sha256", secret).update(body).digest("hex");
+  const response = await fetch(targetUrl, {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Shield-Signature": `sha256=${signature}` },
+    body, signal: AbortSignal.timeout(10000), redirect: "error",
   });
-
-  try {
-    const bodyStr = JSON.stringify(payload);
-    const hmac = createHmac("sha256", secret).update(bodyStr).digest("hex");
-
-    const res = await fetch(targetUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shield-Signature": `sha256=${hmac}`,
-      },
-      body: bodyStr,
-    });
-
-    if (!res.ok) {
-      debugLog("Webhook", `Webhook delivery failed with HTTP ${res.status}`);
-      return false;
-    }
-    debugLog("Webhook", `Webhook delivered successfully with HTTP ${res.status}`);
-    return true;
-  } catch (err: any) {
-    debugLog("Webhook", `Webhook delivery network error: ${err.message}`);
-    return false;
-  }
+  if (!response.ok) throw new Error(`WordPress callback returned HTTP ${response.status}`);
 }
 
-/**
- * Core processing logic for an evaluation job.
- */
-export async function processEvaluationJob(data: EvaluationJobData) {
-  const {
-    wpCommentId,
-    entityId,
-    entityTitle = "Product/Post",
-    authorSessionHash,
-    rawText,
-    rating,
-    botResult,
-    ipAddress,
-    userAgent,
-    wpWebhookUrl = process.env.WP_DEFAULT_WEBHOOK_URL || "http://127.0.0.1:8080/wp-json/shield/v1/webhook",
-    thresholdMode = "balanced",
-  } = data;
-
-  debugLog("Worker", `Starting evaluation for comment #${wpCommentId} on ${entityId}`, {
-    rating,
-    authorType: botResult.isBot ? "bot" : "human",
-    thresholdMode,
-  });
-
-  // 1. Bot Path
-  if (botResult.isBot) {
-    debugDecision("Worker", "BOT_PATH_ENGAGED", {
-      wpCommentId,
-      visibility: "shadowbanned",
-      reasons: botResult.reasons,
-    });
-
-    let subId = crypto.randomUUID();
-    try {
-      const [sub] = await db
-        .insert(submissions)
-        .values({
-          wpCommentId,
-          entityId,
-          authorSessionHash,
-          rawText,
-          rating: rating ?? null,
-          authorType: "bot",
-          visibility: "shadowbanned",
-          routingPath: "BOT_HONEYPOT",
-          modelUsed: "none",
-          riskScore: 100,
-          shieldFlags: 0,
-          failedRiskIds: [],
-          triggeredShieldIds: [],
-          deepResearchExplanation: null,
-        })
-        .returning();
-      if (sub) subId = sub.id;
-
-      await db.insert(honeypotVault).values({
-        submissionId: subId,
-        ipAddress,
-        userAgent,
-        telemetryJson: {
-          ...botResult.telemetry,
-          confidenceScore: botResult.confidenceScore,
-          reasons: botResult.reasons,
-        },
-        patternClusterId: "cluster_headless_generic",
-      });
-      debugLog("Worker", `Honeypot vault entry recorded for comment #${wpCommentId}`);
-    } catch (dbErr: any) {
-      console.warn(`DB insert failed for bot submission: ${dbErr.message}`);
-    }
-
-    // Notify WordPress to mark comment shadowbanned
-    await sendWordPressWebhook(wpWebhookUrl, {
-      wpCommentId,
-      entityId,
-      visibility: "shadowbanned",
-      authorType: "bot",
-      modelUsed: "none",
-      riskScore: 100,
-      failedRiskIds: [],
-      triggeredShieldIds: [],
-      deepResearchExplanation: null,
-      banner: null,
-    });
-
-    return {
-      wpCommentId,
-      visibility: "shadowbanned",
-      authorType: "bot",
-      modelUsed: "none",
-      hasBanner: false,
-    };
-  }
-
-  // 2. Human Path: Run Jev Fast Screener
-  debugLog("Worker", `Running Stage 1 screener for human comment #${wpCommentId}`);
-  const jevRes = await screenWithJev(rawText);
-
-  // Run Deterministic 50-Question Scorer
-  const scoreRes = evaluateSemEvalBitmask({
-    triggeredIds: jevRes.triggeredIds,
-    mode: thresholdMode,
-  });
-
-  let visibility: "public" | "public_flagged" | "shadowbanned" = "public";
-  let modelUsed: "none" | "jev" | "gemini-4-hydrogen" = "jev";
+export async function analyzeText(text: string, mode: ThresholdMode) {
+  const screened = await screenWithJev(text);
+  const scored = evaluateSemEvalBitmask({ triggeredIds: screened.triggeredIds, mode });
+  const escalateToResearch = scored.escalateToResearch || screened.needsFactCheck || screened.needsWebSearch;
+  const route = !scored.escalateToResearch && escalateToResearch ? "ROUTE_5_FACT_CHECK" : scored.route;
+  let modelUsed = screened.modelUsed;
   let explanation: string | null = null;
-
-  // Escalation check
-  if (scoreRes.escalateToHydrogen) {
-    debugDecision("Worker", "ESCALATING_TO_HYDROGEN", {
-      route: scoreRes.route,
-      failedRiskIds: scoreRes.failedRiskIds,
+  let visibility: "public" | "public_flagged" = "public";
+  let researchEvidence: Pick<ForensicResult, "researchStatus" | "sources" | "quoteChecks" | "claimChecks" | "searchPerformed"> | null = null;
+  if (escalateToResearch) {
+    debugLog("Analysis", "Starting heavy-model verification", {
+      route, searchRequested: screened.needsWebSearch, factCheckRequested: screened.needsFactCheck,
+      model: researchModel(),
     });
-
-    modelUsed = "gemini-4-hydrogen";
-    const forensicRes = await verifyStanceOrForensic(
-      rawText,
-      scoreRes.route === "ROUTE_3_STANCE_VERIFICATION"
-        ? "ROUTE_3_STANCE_VERIFICATION"
-        : "ROUTE_4_FORENSIC_THREAT",
-      scoreRes.failedRiskIds
-    );
-
-    if (!forensicRes.endorsed) {
-      visibility = "public";
-      explanation = null;
-      debugDecision("Worker", `${scoreRes.route}_CLEARED_AS_BENIGN`, {
-        commentId: wpCommentId,
-        visibility: "public",
-      });
-    } else {
-      visibility = "public_flagged";
-      explanation = forensicRes.deepResearchExplanation;
-      debugDecision("Worker", "FORENSIC_THREAT_CONFIRMED", {
-        commentId: wpCommentId,
-        visibility: "public_flagged",
-        hasExplanation: !!explanation,
-      });
-    }
-  } else {
-    visibility = "public";
-    modelUsed = "jev";
-    explanation = null;
-    debugDecision("Worker", `CLEARED_BY_FAST_PATH (${scoreRes.route})`, {
-      commentId: wpCommentId,
-      visibility: "public",
-      riskScore: scoreRes.riskScore,
+    const forensic = await verifyStanceOrForensic(text, route, scored.failedRiskIds, scored.triggeredShieldIds, {
+      searchRequested: screened.needsWebSearch, factCheckRequested: screened.needsFactCheck,
+    });
+    if (forensic.modelUsed !== "none") modelUsed = forensic.modelUsed;
+    explanation = forensic.deepResearchExplanation;
+    researchEvidence = { researchStatus: forensic.researchStatus, sources: forensic.sources, quoteChecks: forensic.quoteChecks, claimChecks: forensic.claimChecks, searchPerformed: forensic.searchPerformed };
+    if (forensic.flagged) visibility = "public_flagged";
+    const decision = !forensic.flagged ? "CLEARED_BY_CONTEXT"
+      : forensic.claimChecks.some(check => check.status === "incorrect" || check.status === "misleading") ? "FACTUAL_CLAIMS_FLAGGED"
+      : forensic.researchStatus === "unverified" || forensic.claimChecks.some(check => check.status === "unsubstantiated") ? "UNSUBSTANTIATED_CLAIMS_FLAGGED" : "MANIPULATION_CONFIRMED";
+    debugDecision("Analysis", decision, {
+      route, modelUsed, visibility, searchPerformed: forensic.searchPerformed,
+      researchStatus: forensic.researchStatus, sourceCount: forensic.sources.length,
+      unverifiedQuotes: forensic.quoteChecks.filter(check => check.status === "unverified").length,
+      hasExplanation: !!explanation,
     });
   }
+  return { ...scored, route, escalateToResearch, visibility, modelUsed, deepResearchExplanation: explanation, researchEvidence };
+}
 
-  // Save submission to PostgreSQL
-  try {
-    await db.insert(submissions).values({
-      wpCommentId,
-      entityId,
-      authorSessionHash,
-      rawText,
-      rating: rating ?? null,
-      authorType: "human",
-      visibility,
-      routingPath: scoreRes.route,
-      modelUsed,
-      riskScore: scoreRes.riskScore,
-      shieldFlags: scoreRes.shieldFlags,
-      failedRiskIds: scoreRes.failedRiskIds,
-      triggeredShieldIds: scoreRes.triggeredShieldIds,
-      deepResearchExplanation: explanation,
-    });
-    debugLog("Worker", `Recorded submission #${wpCommentId} to database (visibility: ${visibility})`);
-  } catch (dbErr: any) {
-    console.warn(`DB insert failed for human submission: ${dbErr.message}`);
-  }
-
-  // Review Bombing Velocity Tracker for ratings
-  let bannerPayload: { anomalyStatus: string; bannerExplanation: string | null } | null = null;
-  if (typeof rating === "number" && rating <= 2) {
-    try {
-      const banner = await checkReviewBombingSpike(entityId, entityTitle, rating, rawText);
-      if (banner) {
-        bannerPayload = banner;
-      }
-    } catch (e: any) {
-      console.warn(`Review bombing check warning: ${e.message}`);
-    }
-  }
-
-  // If comment is public_flagged (Route 4 / Coordinated Disinformation Threat), attach entity banner notice!
-  if (visibility === "public_flagged" && !bannerPayload) {
-    const bannerExplanation = explanation
-      ? `Notice: Coordinated manipulation or disputed framing was detected in discussions for "${entityTitle}". Review the forensic context attached to flagged comments.`
-      : `Notice: Content on "${entityTitle}" has been flagged by automated forensic checks for potential coordinated framing.`;
-
-    bannerPayload = {
-      anomalyStatus: "coordinated_attack",
-      bannerExplanation,
-    };
-
-    inMemoryBanners.set(entityId, {
-      entityId,
-      anomalyStatus: bannerPayload.anomalyStatus,
-      bannerExplanation: bannerPayload.bannerExplanation,
-    });
-
-    try {
-      await db
-        .insert(entityBanners)
-        .values({
-          entityId,
-          anomalyStatus: bannerPayload.anomalyStatus,
-          bannerExplanation: bannerPayload.bannerExplanation,
-          updatedAt: new Date(),
-        })
-        .onConflictDoUpdate({
-          target: entityBanners.entityId,
-          set: {
-            anomalyStatus: bannerPayload.anomalyStatus,
-            bannerExplanation: bannerPayload.bannerExplanation,
-            updatedAt: new Date(),
-          },
-        });
-      debugDecision("Worker", "ENTITY_BANNER_ACTIVATED_FOR_FLAGGED_CONTENT", {
-        entityId,
-        anomalyStatus: bannerPayload.anomalyStatus,
-        bannerExplanation,
-      });
-    } catch (dbErr: any) {
-      console.warn(`Failed to update entity banner in DB: ${dbErr.message}`);
-    }
-  }
-
-  // Webhook back to WordPress
-  await sendWordPressWebhook(wpWebhookUrl, {
-    wpCommentId,
-    entityId,
-    visibility,
-    authorType: "human",
-    modelUsed,
-    riskScore: scoreRes.riskScore,
-    failedRiskIds: scoreRes.failedRiskIds,
-    triggeredShieldIds: scoreRes.triggeredShieldIds,
-    deepResearchExplanation: explanation,
-    banner: bannerPayload,
-  });
-
-  return {
-    wpCommentId,
-    visibility,
-    authorType: "human",
-    modelUsed,
-    riskScore: scoreRes.riskScore,
-    failedRiskIds: scoreRes.failedRiskIds,
-    triggeredShieldIds: scoreRes.triggeredShieldIds,
-    deepResearchExplanation: explanation,
-    banner: bannerPayload,
-    hasBanner: !!bannerPayload,
+export async function processEvaluationJob(data: EvaluationJobData) {
+  const { tenantId, wpCommentId, entityId, rawText, authorSessionHash, rating, botResult } = data;
+  const analysis = botResult.isBot ? null : await analyzeText(rawText, data.thresholdMode);
+  const result = {
+    wpCommentId, entityId, visibility: analysis?.visibility || "shadowbanned",
+    authorType: botResult.isBot ? "bot" : "human", modelUsed: analysis?.modelUsed || "none",
+    riskScore: analysis?.riskScore ?? 100, shieldFlags: analysis?.shieldFlags ?? 0,
+    routingPath: analysis?.route || "BOT_HONEYPOT",
+    failedRiskIds: analysis?.failedRiskIds || [], triggeredShieldIds: analysis?.triggeredShieldIds || [],
+    deepResearchExplanation: analysis?.deepResearchExplanation ?? null,
+    researchEvidence: analysis?.researchEvidence ?? null,
+    banner: null as Record<string, any> | null,
   };
+  // Persist both the submission and vault atomically; retries never duplicate submissions.
+  await db.transaction(async tx => {
+    const [saved] = await tx.insert(submissions).values({
+      ...result, tenantId, rawText, authorSessionHash, rating: rating ?? null,
+    }).onConflictDoNothing({ target: [submissions.tenantId, submissions.wpCommentId] }).returning();
+    if (saved && botResult.isBot) await tx.insert(honeypotVault).values({
+      submissionId: saved.id, ipAddress: data.ipAddress, userAgent: data.userAgent,
+      telemetryJson: { ...botResult.telemetry, reasons: botResult.reasons, confidenceScore: botResult.confidenceScore },
+      patternClusterId: honeypotPatternId(rawText),
+    });
+  });
+  // An individual rhetoric flag is not evidence of an entity-wide coordinated attack.
+  // A separate durable job grounds review anomalies, so it cannot delay comment publication.
+  return result;
 }
 
-async function checkReviewBombingSpike(
-  entityId: string,
-  entityTitle: string,
-  rating: number,
-  text: string
-): Promise<{ anomalyStatus: "legitimate_backlash" | "coordinated_attack" | "normal"; bannerExplanation: string | null } | null> {
-  const reviews = inMemoryReviewTracker.get(entityId) || [];
-  reviews.push({ rating, text, createdAt: new Date() });
-  inMemoryReviewTracker.set(entityId, reviews);
-
-  const oneStarReviews = reviews.filter((r) => r.rating <= 2);
-  debugLog("VelocityTracker", `Rolling negative review count for ${entityId}: ${oneStarReviews.length}`);
-
-  if (oneStarReviews.length >= 3) {
-    debugDecision("VelocityTracker", "NEGATIVE_REVIEW_SPIKE_TRIGGERED", {
-      entityId,
-      entityTitle,
-      negativeCount: oneStarReviews.length,
-    });
-
-    const investigation = await investigateReviewBombing(entityId, entityTitle, oneStarReviews);
-
-    inMemoryBanners.set(entityId, {
-      entityId,
-      anomalyStatus: investigation.anomalyStatus,
-      bannerExplanation: investigation.bannerExplanation,
-    });
-
-    try {
-      await db
-        .insert(entityBanners)
-        .values({
-          entityId,
-          anomalyStatus: investigation.anomalyStatus,
-          bannerExplanation: investigation.bannerExplanation,
-          updatedAt: new Date(),
-        })
-        .onConflictDoUpdate({
-          target: entityBanners.entityId,
-          set: {
-            anomalyStatus: investigation.anomalyStatus,
-            bannerExplanation: investigation.bannerExplanation,
-            updatedAt: new Date(),
-          },
-        });
-    } catch (dbErr: any) {
-      console.warn(`Failed to update entity banner in DB: ${dbErr.message}`);
-    }
-
-    return {
-      anomalyStatus: investigation.anomalyStatus,
-      bannerExplanation: investigation.bannerExplanation,
-    };
+async function investigateEntity(data: EvaluationJobData) {
+  if (data.botResult.isBot || data.rating == null) return;
+  const recent = await db.select().from(submissions).where(and(
+    eq(submissions.tenantId, data.tenantId), eq(submissions.entityId, data.entityId),
+    eq(submissions.authorType, "human"), gte(submissions.createdAt, new Date(Date.now() - 25 * 3600000)),
+  ));
+  const velocity = detectReviewSpike(recent.filter(r => r.rating !== null).map(r => ({
+    rating: r.rating!, text: r.rawText, authorSessionHash: r.authorSessionHash, createdAt: r.createdAt,
+  })));
+  if (!velocity.spike) return;
+  const [existing] = await db.select().from(entityBanners).where(and(eq(entityBanners.tenantId, data.tenantId), eq(entityBanners.entityId, data.entityId)));
+  if (existing && existing.updatedAt.getTime() > Date.now() - 15 * 60000) {
+    const [tenant] = await db.select().from(tenants).where(eq(tenants.id, data.tenantId));
+    if (!tenant?.webhookSecret) throw new Error("Tenant callback secret missing");
+    await sendWordPressWebhook(tenant.wpWebhookUrl, { entityId: data.entityId, banner: existing, eventType: "entity_banner" }, tenant.webhookSecret);
+    return;
   }
-
-  return null;
+  const investigation = await investigateReviewBombing(data.entityId, data.entityTitle || data.entityId, velocity.negatives);
+  const banner = { anomalyStatus: investigation.anomalyStatus, bannerExplanation: investigation.bannerExplanation, sources: investigation.sources };
+  await db.insert(entityBanners).values({ tenantId: data.tenantId, entityId: data.entityId, ...banner }).onConflictDoUpdate({
+    target: [entityBanners.tenantId, entityBanners.entityId], set: { ...banner, updatedAt: new Date() },
+  });
+  const [tenant] = await db.select().from(tenants).where(eq(tenants.id, data.tenantId));
+  if (!tenant?.webhookSecret) throw new Error("Tenant callback secret missing");
+  // Banner-only callbacks cannot overwrite a comment verdict.
+  await sendWordPressWebhook(tenant.wpWebhookUrl, { entityId: data.entityId, banner, eventType: "entity_banner" }, tenant.webhookSecret);
 }
 
-export function startWorker(): Worker<EvaluationJobData> | null {
+async function runJob(id: string) {
+  // The advisory lock prevents concurrent duplicate processing across worker instances.
+  // Keep it on a dedicated connection; model calls must not occupy the general DB pool.
+  const reserved = await sql.reserve();
   try {
-    const conn = getRedisConnection();
-    const worker = new Worker<EvaluationJobData>(
-      "shield-evaluation",
-      async (job: Job<EvaluationJobData>) => {
-        debugLog("BullMQ", `Processing queued job ${job.id} for comment #${job.data.wpCommentId}`);
-        return processEvaluationJob(job.data);
-      },
-      { connection: conn, concurrency: 5 }
-    );
-
-    worker.on("completed", (job) => {
-      debugLog("BullMQ", `Job ${job.id} completed (comment #${job.data.wpCommentId})`);
+    await reserved`select pg_advisory_lock(hashtext(${id}))`;
+    const [job] = await db.select().from(evaluationJobs).where(eq(evaluationJobs.id, id));
+    if (!job || job.deliveredAt) return;
+    const data = job.data as EvaluationJobData;
+    const result = job.result || await processEvaluationJob(data);
+    if (!job.result) await db.update(evaluationJobs).set({ result }).where(eq(evaluationJobs.id, id));
+    debugDecision("Worker", "EVALUATION_STORED", {
+      wpCommentId: data.wpCommentId, route: result.routingPath,
+      visibility: result.visibility, modelUsed: result.modelUsed,
     });
-
-    worker.on("failed", (job, err) => {
-      console.error(`[BullMQ Worker] Job ${job?.id} failed:`, err.message);
+    const [tenant] = await db.select().from(tenants).where(eq(tenants.id, data.tenantId));
+    if (!tenant?.webhookSecret) throw new Error("Tenant callback secret missing");
+    await sendWordPressWebhook(tenant.wpWebhookUrl, result, tenant.webhookSecret);
+    await db.update(evaluationJobs).set({ deliveredAt: new Date(), failureCount: 0, nextAttemptAt: null, retryPausedAt: null, lastError: null }).where(eq(evaluationJobs.id, id));
+    debugDecision("Worker", "WORDPRESS_CALLBACK_DELIVERED", {
+      wpCommentId: data.wpCommentId, visibility: result.visibility,
+      hasExplanation: !!result.deepResearchExplanation,
     });
-
-    return worker;
-  } catch (err: any) {
-    console.warn(`Failed to start BullMQ worker: ${err.message}`);
-    return null;
+  } finally {
+    try { await reserved`select pg_advisory_unlock(hashtext(${id}))`; } finally { reserved.release(); }
   }
+}
+
+let dispatching = false;
+export async function dispatchPendingJobs() {
+  if (dispatching || !queue || connection?.status !== "ready") return;
+  dispatching = true;
+  try {
+    const pending = await db.select().from(evaluationJobs).where(and(
+      eq(evaluationJobs.queueName, evaluationQueueName()), isNull(evaluationJobs.retryPausedAt),
+      lt(evaluationJobs.failureCount, MAX_JOB_FAILURES),
+      or(isNull(evaluationJobs.nextAttemptAt), lte(evaluationJobs.nextAttemptAt, new Date())),
+      or(isNull(evaluationJobs.deliveredAt), isNull(evaluationJobs.contextCompletedAt)),
+    )).orderBy(asc(evaluationJobs.createdAt)).limit(1000);
+    for (const job of pending) await queue.add(job.deliveredAt ? "review-context" : "evaluate", { id: job.id }, {
+      jobId: job.deliveredAt ? `review-${job.id}` : job.id, attempts: MAX_JOB_FAILURES, backoff: { type: "provider-aware" },
+      removeOnComplete: true, removeOnFail: true,
+    });
+  } finally { dispatching = false; }
+}
+
+async function processQueuedJob(job: Job, token?: string) {
+  const [state] = await db.select().from(evaluationJobs).where(eq(evaluationJobs.id, job.data.id));
+  if (!state || state.retryPausedAt || state.failureCount >= MAX_JOB_FAILURES) return;
+  if (state.nextAttemptAt && state.nextAttemptAt.getTime() > Date.now()) {
+    await job.moveToDelayed(state.nextAttemptAt.getTime(), token);
+    throw new DelayedError();
+  }
+  try {
+    if (job.name !== "review-context") return await runJob(job.data.id);
+    if (state.contextCompletedAt) return;
+    const data = state.data as EvaluationJobData;
+    const reserved = await sql.reserve();
+    const lock = `review-${data.tenantId}-${data.entityId}`;
+    try {
+      await reserved`select pg_advisory_lock(hashtext(${lock}))`;
+      await investigateEntity(data);
+      await db.update(evaluationJobs).set({ contextCompletedAt: new Date(), failureCount: 0, nextAttemptAt: null, retryPausedAt: null, lastError: null }).where(eq(evaluationJobs.id, state.id));
+    } finally {
+      try { await reserved`select pg_advisory_unlock(hashtext(${lock}))`; } finally { reserved.release(); }
+    }
+  } catch (error) {
+    const delay = retryDelay(error, state.failureCount + 1);
+    const [updated] = await db.update(evaluationJobs).set({
+      failureCount: expression`${evaluationJobs.failureCount} + 1`,
+      nextAttemptAt: delay < 0 ? null : new Date(Date.now() + delay),
+      lastError: {
+        message: error instanceof Error ? error.message : "Evaluation failed",
+        reason: error instanceof ProviderHttpError ? error.reason : "processing_error",
+        ...(error instanceof ProviderHttpError ? { status: error.status } : {}),
+      },
+    }).where(eq(evaluationJobs.id, state.id)).returning({ failureCount: evaluationJobs.failureCount });
+    if (delay < 0 || (updated?.failureCount || 0) >= MAX_JOB_FAILURES) {
+      await db.update(evaluationJobs).set({ retryPausedAt: new Date(), nextAttemptAt: null }).where(eq(evaluationJobs.id, state.id));
+    }
+    throw error;
+  }
+}
+
+export function startWorker() {
+  if (worker) return worker;
+  queue = new Queue(evaluationQueueName(), { connection: redis() });
+  worker = new Worker(evaluationQueueName(), processQueuedJob, {
+    connection: redis(), concurrency: 5,
+    settings: { backoffStrategy: (attempt, _type, error) => retryDelay(error, attempt) },
+  });
+  worker.on("error", err => console.warn("Evaluation worker:", err.message));
+  worker.on("failed", (job, err) => console.warn(`Job ${job?.id} failed: ${err.message}`));
+  timer = setInterval(() => { void dispatchPendingJobs().catch(err => console.warn("Outbox dispatch:", err.message)); }, 5000);
+  timer.unref();
+  void dispatchPendingJobs().catch(() => {});
+  return worker;
+}
+
+export async function stopWorker() {
+  clearInterval(timer);
+  await worker?.close(); await queue?.close(); connection?.disconnect();
+  worker = null; queue = null; connection = null;
 }

@@ -1,5 +1,5 @@
 /**
- * Shield Guard Invisible Client Telemetry Collector
+ * Verius Invisible Client Telemetry Collector
  * Passively captures keystroke variance, mouse/touch movement, form completion timing, and webdriver.
  * Zero external requests; serializes payload directly into _shield_token on form submit.
  */
@@ -7,7 +7,7 @@
   'use strict';
 
   function initCollector() {
-    const forms = document.querySelectorAll('#commentform, #review_form, form.comment-form');
+    const forms = document.querySelectorAll('form#commentform, #review_form form, form.comment-form');
     if (!forms.length) return;
 
     forms.forEach(function(form) {
@@ -19,6 +19,15 @@
       let touches = 0;
       let keyPressTimes = [];
       let lastKeyTime = 0;
+
+      const decode = function(value) { return Uint8Array.from(atob(value), function(c) { return c.charCodeAt(0); }); };
+      const encode = function(value) { return btoa(String.fromCharCode.apply(null, new Uint8Array(value))); };
+      const publicKey = window.shieldMetricsConfig && window.shieldMetricsConfig.publicKey;
+      const keyPromise = publicKey && window.crypto && window.crypto.subtle
+        ? crypto.subtle.importKey('spki', decode(publicKey), { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']).catch(function() { return null; })
+        : Promise.resolve(null);
+      let preparingSubmission = false;
+      let replayingSubmission = false;
 
       // Inject hidden honeypot input (invisible to real users, irresistible to dumb bots)
       let hp = form.querySelector('input[name="_shield_hp_field"]');
@@ -59,7 +68,12 @@
         lastKeyTime = now;
       }, { passive: true });
 
-      form.addEventListener('submit', function() {
+      form.addEventListener('submit', async function(event) {
+        if (replayingSubmission) return;
+        event.preventDefault();
+        if (preparingSubmission) return;
+        preparingSubmission = true;
+        const submitter = event.submitter;
         const completionTime = Date.now() - startTime;
         let variance = 0;
 
@@ -85,12 +99,33 @@
           timestamp: Date.now()
         };
 
-        // Encode as Base64 JSON
+        // The private decryption key stays on the backend. No readable telemetry is posted.
         try {
-          tokenInput.value = btoa(JSON.stringify(payload));
-        } catch(e) {
-          tokenInput.value = JSON.stringify(payload);
-        }
+          const rsaKey = await keyPromise;
+          if (rsaKey) {
+            const aesKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt']);
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, aesKey, new TextEncoder().encode(JSON.stringify(payload)));
+            const wrapped = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, rsaKey, await crypto.subtle.exportKey('raw', aesKey));
+            tokenInput.value = ['v1', encode(wrapped), encode(iv), encode(encrypted)].join('.');
+          }
+        } catch(e) { tokenInput.value = ''; }
+        // Browsers suppress requestSubmit while a submit event is still being dispatched.
+        // Even awaited crypto may finish at a microtask checkpoint within that dispatch.
+        // A new task lets the original dispatch finish before replaying native submission.
+        setTimeout(function() {
+          replayingSubmission = true;
+          try {
+            if (HTMLFormElement.prototype.requestSubmit) {
+              HTMLFormElement.prototype.requestSubmit.call(form, submitter && submitter.form === form ? submitter : undefined);
+            } else {
+              HTMLFormElement.prototype.submit.call(form);
+            }
+          } finally {
+            replayingSubmission = false;
+            preparingSubmission = false;
+          }
+        }, 0);
       });
     });
   }

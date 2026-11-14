@@ -2,10 +2,25 @@ import { Hono } from "hono";
 import { execSync } from "child_process";
 import { apiRouter } from "./routes/api";
 import { startWorker } from "./workers/evaluation-worker";
+import { checkQueueHealth } from "./workers/evaluation-worker";
+import { sql } from "./db";
+import { webGroundingConfigured, researchModel } from "./ai/web-grounding";
 
 const app = new Hono();
 const PORT = parseInt(process.env.PORT || "4000", 10);
 const START_TIME = new Date();
+
+app.get("/api/ready", async c => {
+  let database = false, queue = false;
+  try { await sql`select 1`; database = true; } catch {}
+  try {
+    queue = await checkQueueHealth();
+  } catch {}
+  const aiConfigured = !!process.env.HOSTINGER_AI_API_KEY && !process.env.HOSTINGER_AI_API_KEY.startsWith("replace_");
+  const groundingConfigured = webGroundingConfigured();
+  const ready = database && queue && aiConfigured && groundingConfigured;
+  return c.json({ status: ready ? "ready" : "degraded", database, queue, aiConfigured, researchGroundingConfigured: groundingConfigured, reviewGroundingConfigured: groundingConfigured }, ready ? 200 : 503);
+});
 
 function getGitInfo() {
   try {
@@ -41,7 +56,7 @@ app.get("/api/health", (c) => {
 app.get("/api/version", (c) => {
   const git = getGitInfo();
   return c.json({
-    version: "2.0.0",
+    version: "2.1.0",
     commit: git.commit,
     branch: git.branch,
     commitDate: git.commitDate,
@@ -52,30 +67,17 @@ app.get("/api/version", (c) => {
 app.get("/api/info", (c) => {
   const git = getGitInfo();
   return c.json({
-    service: "truthier-api",
-    version: "2.0.0",
-    engine: "SemEval-50 + Hostinger AI Router (jev & gemini-4-hydrogen)",
+    service: "verius-api",
+    version: "2.1.0",
+    engine: "SemEval-50 + fast screener + grounded research model",
+    researchModel: researchModel(),
     bunVersion: Bun.version,
     git,
     startedAt: START_TIME.toISOString(),
   });
 });
 
-// GitHub Push Webhook endpoint for auto-sync
-app.post("/api/webhook", (c) => {
-  console.log(`[${new Date().toISOString()}] Received webhook request`);
-  try {
-    const pullOutput = execSync("git pull origin main 2>&1", { encoding: "utf8" });
-    if (pullOutput.includes("package.json")) {
-      execSync("bun install", { stdio: "inherit" });
-    }
-    return c.json({ status: "updated", output: pullOutput });
-  } catch (err: any) {
-    return c.json({ status: "error", error: err.message }, 500);
-  }
-});
-
-// Mount Truthier V1 API Routes
+// Mount Verius V1 API Routes
 app.route("/", apiRouter);
 
 // Root Dashboard UI
@@ -89,7 +91,7 @@ app.get("/", (c) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Truthier &bull; Bot & Propaganda Defense</title>
+  <title>Verius &bull; Bot & Propaganda Defense</title>
   <style>
     :root {
       --bg: #090d16;
@@ -228,13 +230,13 @@ app.get("/", (c) => {
       <div class="title-group">
         <span class="badge">🛡️</span>
         <div>
-          <h1>Truthier</h1>
-          <p style="color: var(--text-muted); font-size: 13px;">Coordinated Propaganda & Bot Defense &bull; v2.0</p>
+          <h1>Verius</h1>
+          <p style="color: var(--text-muted); font-size: 13px;">Coordinated Propaganda & Bot Defense &bull; v2.1</p>
         </div>
       </div>
       <div class="status-badge">
         <div class="pulse-dot"></div>
-        Active
+        <span id="service-state">Checking…</span>
       </div>
     </div>
 
@@ -249,7 +251,7 @@ app.get("/", (c) => {
       </div>
       <div class="card">
         <div class="card-label">Forensic Heavy Model</div>
-        <div class="card-val">${process.env.MODEL_HEAVY_RESEARCH || "gemini-4-hydrogen"}</div>
+        <div class="card-val">${researchModel()}</div>
       </div>
       <div class="card">
         <div class="card-label">Git Commit</div>
@@ -273,7 +275,7 @@ app.get("/", (c) => {
       </div>
       <div class="route-row">
         <span>Route 3 / Route 4</span>
-        <span class="tag tag-orange">gemini-4-hydrogen Forensic & Stance Check</span>
+        <span class="tag tag-orange">Web Research & Quote Context Check</span>
       </div>
       <div class="route-row">
         <span>Review Bombing Defense</span>
@@ -286,6 +288,11 @@ app.get("/", (c) => {
       <div>Uptime: <span class="tag">${uptimeStr}</span></div>
     </div>
   </div>
+<script>
+fetch('/api/ready').then(function(r) { return r.json(); }).then(function(s) {
+  document.getElementById('service-state').textContent = s.status === 'ready' ? 'Ready' : 'Degraded';
+}).catch(function() { document.getElementById('service-state').textContent = 'Unavailable'; });
+</script>
 </body>
 </html>`;
 
@@ -293,11 +300,12 @@ app.get("/", (c) => {
 });
 
 // Start BullMQ background worker if Redis is reachable
-startWorker();
+if (import.meta.main) startWorker();
 
 export default {
+  hostname: process.env.HOST || "127.0.0.1",
   port: PORT,
   fetch: app.fetch,
 };
 
-console.log(`🛡️ Truthier Bun API running at http://localhost:${PORT}`);
+if (import.meta.main) console.log(`Verius API running on port ${PORT}`);

@@ -1,17 +1,11 @@
-import {
-  SEMEVAL_QUESTIONS,
-  type QuestionId,
-  type QuestionBucket,
-} from "../config/semeval-questions";
 import { debugLog, debugDecision } from "../config/logger";
 
-export type { QuestionId };
 export type ThresholdMode = "strict" | "balanced" | "high_precision";
+export type QuestionId = `Q${number}`;
 
 export interface SemEvalInput {
   triggeredIds: QuestionId[];
   mode: ThresholdMode;
-  textLength?: number; // Optional: text length for adaptive thresholding
 }
 
 export interface SemEvalResult {
@@ -20,7 +14,7 @@ export interface SemEvalResult {
   activeRiskBuckets: number;
   synergyBonusApplied: boolean;
   bucket1CapApplied: boolean;
-  overrideTriggered: "DOUBLE_RED_FLAG" | "TIER_3_ESCALATION" | "GATEKEEPER_ESCALATION" | null;
+  overrideTriggered: "DOUBLE_RED_FLAG" | "HARD_EVIDENCE_VETO" | null;
   failedRiskIds: QuestionId[];
   triggeredShieldIds: QuestionId[];
   route:
@@ -28,133 +22,86 @@ export interface SemEvalResult {
     | "ROUTE_2_SHIELDED_CLEAR"
     | "ROUTE_3_STANCE_VERIFICATION"
     | "ROUTE_4_FORENSIC_THREAT";
-  escalateToHydrogen: boolean;
+  escalateToResearch: boolean;
 }
 
-const BUCKET_RISK_MAP: Record<"EMOTION" | "IDENTITY_AUTHORITY" | "FALLACY_DEFLECTION" | "SEVERE_MANIPULATION", number[]> = {
-  EMOTION: [1, 2, 3, 4],
-  IDENTITY_AUTHORITY: [5, 6, 7, 8, 9],
-  FALLACY_DEFLECTION: [10, 11, 12, 13],
-  SEVERE_MANIPULATION: [14, 15, 16, 17, 18, 19],
+const BUCKET_MAP: Record<number, number[]> = {
+  1: [1, 2, 3, 4, 5, 6, 7, 8],
+  2: [9, 10, 11, 12, 13, 14, 15, 16, 17],
+  3: [18, 19, 20, 21, 22, 23, 24, 25],
+  4: [26, 27, 28, 29, 30, 31, 32],
+  5: [33, 34, 35, 36, 37, 38],
+  6: [39, 40, 41, 42, 43, 44],
 };
 
-/**
- * Gate thresholds for SemEval scoring:
- * Gate threshold is 1 for strict and balanced, 2 for high_precision.
- */
-function getGateThreshold(mode: ThresholdMode, textLength: number): number {
-  switch (mode) {
-    case "strict":
-      return 1;
-    case "balanced":
-      return 1;
-    case "high_precision":
-      return 2;
-  }
-}
+const TIER_3_QUESTIONS = new Set([8, 10, 16, 17, 18, 19, 25, 26, 27, 37, 38, 41, 44]);
+const TIER_1_QUESTIONS = new Set([1, 2, 3, 4, 5, 6, 7, 39, 40, 42, 43]);
+const DOUBLE_WEIGHT_SHIELDS = new Set([46, 47, 49]);
+
+const MODE_THRESHOLDS: Record<ThresholdMode, { base: number; shielded: number }> = {
+  strict: { base: 5, shielded: 7 },
+  balanced: { base: 7, shielded: 10 },
+  high_precision: { base: 10, shielded: 13 },
+};
 
 export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
+  const activeNums = new Set(
+    input.triggeredIds.filter(id => /^Q([1-9]|[1-4][0-9]|50)$/.test(id)).map((id) => Number(id.slice(1)))
+  );
+
   const failedRiskIds: QuestionId[] = [];
   const triggeredShieldIds: QuestionId[] = [];
 
-  const bucketPoints: Record<"EMOTION" | "IDENTITY_AUTHORITY" | "FALLACY_DEFLECTION" | "SEVERE_MANIPULATION", number> = {
-    EMOTION: 0,
-    IDENTITY_AUTHORITY: 0,
-    FALLACY_DEFLECTION: 0,
-    SEVERE_MANIPULATION: 0,
-  };
-
+  const bucketPoints: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
   let tier3Count = 0;
   let shieldFlags = 0;
-  let emotionCount = 0;
 
-  for (const id of input.triggeredIds) {
-    const q = SEMEVAL_QUESTIONS[id];
-    if (!q) continue;
+  for (const qNum of activeNums) {
+    if (qNum >= 1 && qNum <= 44) {
+      failedRiskIds.push(`Q${qNum}`);
+      const pts = TIER_3_QUESTIONS.has(qNum) ? 3 : TIER_1_QUESTIONS.has(qNum) ? 1 : 2;
+      if (pts === 3) tier3Count++;
 
-    if (!q.isShield) {
-      failedRiskIds.push(id);
-      const pts = q.pointsOrFlags;
-      if (q.tier === 3) tier3Count++;
-      if (q.bucket === "EMOTION") emotionCount++;
-
-      if (q.bucket in bucketPoints) {
-        bucketPoints[q.bucket as keyof typeof bucketPoints] += pts;
+      for (const [bId, qList] of Object.entries(BUCKET_MAP)) {
+        if (qList.includes(qNum)) {
+          bucketPoints[Number(bId)] = (bucketPoints[Number(bId)] ?? 0) + pts;
+          break;
+        }
       }
-    } else {
-      triggeredShieldIds.push(id);
-      shieldFlags += q.pointsOrFlags;
+    } else if (qNum >= 45 && qNum <= 50) {
+      triggeredShieldIds.push(`Q${qNum}`);
+      shieldFlags += DOUBLE_WEIGHT_SHIELDS.has(qNum) ? 2 : 1;
     }
   }
 
   const activeBuckets = Object.entries(bucketPoints).filter(([_, pts]) => pts > 0);
   const activeRiskBuckets = activeBuckets.length;
 
-  // Bucket 1 single-bucket emotional cap:
-  // (max 3 pts when ONLY a single Q1-Q4 question fires)
   let bucket1CapApplied = false;
-  if (activeRiskBuckets === 1 && bucketPoints.EMOTION > 3 && emotionCount === 1) {
-    bucketPoints.EMOTION = 3;
+  if (activeRiskBuckets === 1 && (bucketPoints[1] ?? 0) > 3) {
+    bucketPoints[1] = 3;
     bucket1CapApplied = true;
   }
 
   let riskScore = Object.values(bucketPoints).reduce((sum, val) => sum + val, 0);
 
-  // Cross-Bucket Synergy bonus: +2 pts when >= 3 distinct risk buckets fire
   const synergyBonusApplied = activeRiskBuckets >= 3;
   if (synergyBonusApplied) {
     riskScore += 2;
   }
 
-  const textLength = input.textLength ?? 100;
-  const gateThreshold = getGateThreshold(input.mode, textLength);
+  let { base: baseThreshold, shielded: shieldedThreshold } = MODE_THRESHOLDS[input.mode];
   let overrideTriggered: SemEvalResult["overrideTriggered"] = null;
 
-  if (tier3Count >= 2 && shieldFlags === 0) {
+  if (activeNums.has(48) && activeNums.has(49)) {
+    overrideTriggered = "HARD_EVIDENCE_VETO";
+    baseThreshold = Math.max(baseThreshold, 12);
+    shieldedThreshold = Math.max(shieldedThreshold, 12);
+  }
+
+  const doubleRedFlag = tier3Count >= 2 && shieldFlags === 0 && riskScore >= 6;
+  if (doubleRedFlag) {
     overrideTriggered = "DOUBLE_RED_FLAG";
-  } else if (tier3Count >= 1) {
-    overrideTriggered = "TIER_3_ESCALATION";
-  }
-
-  // ---------------------------------------------------------------------------
-  // High-Recall Gatekeeper Cutoff
-  // - Escalate whenever riskScore >= gateThreshold OR failedRiskIds.length >= 1 OR tier3Count >= 1
-  // - Non-S4 shield (S1, S2, S3) fired while riskScore > 0 escalates for stance verification
-  // ---------------------------------------------------------------------------
-  const hasNonS4Shield = triggeredShieldIds.some((s) => s === "S1" || s === "S2" || s === "S3");
-
-  const shouldEscalate =
-    riskScore >= gateThreshold ||
-    failedRiskIds.length >= 1 ||
-    tier3Count >= 1 ||
-    (hasNonS4Shield && riskScore > 0);
-
-  if (shouldEscalate && !overrideTriggered) {
-    overrideTriggered = "GATEKEEPER_ESCALATION";
-  }
-
-  let route: SemEvalResult["route"];
-  let escalateToHydrogen = false;
-
-  if (shouldEscalate) {
-    escalateToHydrogen = true;
-    if (shieldFlags > 0) {
-      // High risk + shields -> Stage 2 (Gemini/Hydrogen) verifies stance/context
-      route = "ROUTE_3_STANCE_VERIFICATION";
-    } else {
-      // High risk without shields -> Forensics threat
-      route = "ROUTE_4_FORENSIC_THREAT";
-    }
-  } else {
-    // Only allow S4 (Everyday Consumer/Sports Venting) to clear locally
-    // when riskScore === 0 AND zero Tier-3 questions fired
-    if (triggeredShieldIds.includes("S4") && riskScore === 0 && tier3Count === 0) {
-      route = "ROUTE_2_SHIELDED_CLEAR";
-      escalateToHydrogen = false;
-    } else {
-      route = "ROUTE_1_FAST_CLEAR";
-      escalateToHydrogen = false;
-    }
   }
 
   debugLog("SemEvalScorer", "Evaluating SemEval Bitmask", {
@@ -168,29 +115,89 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
     bucket1CapApplied,
     synergyBonusApplied,
     riskScore,
-    gateThreshold,
-    textLength,
-    shouldEscalate,
+    baseThreshold,
+    shieldedThreshold,
     overrideTriggered,
   });
 
-  debugDecision("SemEvalScorer", `🎯 ${route}`, {
-    escalateToHydrogen,
-    riskScore,
-    shieldFlags,
-    override: overrideTriggered ?? "none",
+  let result: SemEvalResult;
+
+  if (doubleRedFlag) {
+    result = {
+      riskScore,
+      shieldFlags,
+      activeRiskBuckets,
+      synergyBonusApplied,
+      bucket1CapApplied,
+      overrideTriggered,
+      failedRiskIds,
+      triggeredShieldIds,
+      route: "ROUTE_4_FORENSIC_THREAT",
+      escalateToResearch: true,
+    };
+  } else if (riskScore >= shieldedThreshold && shieldFlags >= 2) {
+    result = {
+      riskScore,
+      shieldFlags,
+      activeRiskBuckets,
+      synergyBonusApplied,
+      bucket1CapApplied,
+      overrideTriggered,
+      failedRiskIds,
+      triggeredShieldIds,
+      route: "ROUTE_3_STANCE_VERIFICATION",
+      escalateToResearch: true,
+    };
+  } else if (
+    (riskScore >= baseThreshold && shieldFlags === 0) ||
+    (riskScore >= shieldedThreshold && shieldFlags <= 1)
+  ) {
+    result = {
+      riskScore,
+      shieldFlags,
+      activeRiskBuckets,
+      synergyBonusApplied,
+      bucket1CapApplied,
+      overrideTriggered,
+      failedRiskIds,
+      triggeredShieldIds,
+      route: "ROUTE_4_FORENSIC_THREAT",
+      escalateToResearch: true,
+    };
+  } else if (riskScore >= 5 && shieldFlags >= 1) {
+    result = {
+      riskScore,
+      shieldFlags,
+      activeRiskBuckets,
+      synergyBonusApplied,
+      bucket1CapApplied,
+      overrideTriggered,
+      failedRiskIds,
+      triggeredShieldIds,
+      route: "ROUTE_2_SHIELDED_CLEAR",
+      escalateToResearch: false,
+    };
+  } else {
+    result = {
+      riskScore,
+      shieldFlags,
+      activeRiskBuckets,
+      synergyBonusApplied,
+      bucket1CapApplied,
+      overrideTriggered,
+      failedRiskIds,
+      triggeredShieldIds,
+      route: "ROUTE_1_FAST_CLEAR",
+      escalateToResearch: false,
+    };
+  }
+
+  debugDecision("SemEvalScorer", result.route, {
+    escalateToResearch: result.escalateToResearch,
+    riskScore: result.riskScore,
+    shieldFlags: result.shieldFlags,
+    override: result.overrideTriggered || "none",
   });
 
-  return {
-    riskScore,
-    shieldFlags,
-    activeRiskBuckets,
-    synergyBonusApplied,
-    bucket1CapApplied,
-    overrideTriggered,
-    failedRiskIds,
-    triggeredShieldIds,
-    route,
-    escalateToHydrogen,
-  };
+  return result;
 }

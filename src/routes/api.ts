@@ -1,306 +1,129 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
-import { evaluateBotTelemetry } from "../engines/bot-telemetry";
-import { screenWithJev } from "../ai/jev-screener";
-import { evaluateSemEvalBitmask, type ThresholdMode } from "../engines/semeval-scorer";
-import { verifyStanceOrForensic } from "../ai/hydrogen-research";
-import { getEvaluationQueue, processEvaluationJob, inMemoryBanners } from "../workers/evaluation-worker";
-import { db } from "../db";
-import { tenants, entityBanners } from "../db/schema";
-import { eq } from "drizzle-orm";
-import { debugLog, debugDecision } from "../config/logger";
+import { and, eq } from "drizzle-orm";
+import { db, sql } from "../db";
+import { tenants, entityBanners, evaluationJobs } from "../db/schema";
+import { evaluateBotTelemetry, getTelemetryPublicKey } from "../engines/bot-telemetry";
+import { analyzeText, dispatchPendingJobs, evaluationQueueName, getEvaluationQueue } from "../workers/evaluation-worker";
+import { ProviderHttpError } from "../ai/provider-errors";
 
-export const apiRouter = new Hono();
-
+export const apiRouter = new Hono<{ Variables: { tenant: typeof tenants.$inferSelect } }>();
+const modeSchema = z.enum(["strict", "balanced", "high_precision"]);
 const ingestSchema = z.object({
-  wpCommentId: z.number(),
-  entityId: z.string(),
-  entityTitle: z.string().optional(),
-  authorSessionHash: z.string(),
-  rawText: z.string(),
-  rating: z.number().nullable().optional(),
-  telemetryToken: z.union([z.string(), z.record(z.any())]).optional(),
-  honeypotValue: z.string().nullable().optional(),
-  tenantApiKey: z.string().optional(),
-  wpWebhookUrl: z.string().optional(),
-  thresholdMode: z.enum(["strict", "balanced", "high_precision"]).optional(),
+  wpCommentId: z.number().int().positive(), entityId: z.string().min(1).max(200),
+  entityTitle: z.string().max(500).optional(), authorSessionHash: z.string().min(1).max(200),
+  rawText: z.string().trim().min(1).max(50000), rating: z.number().int().min(1).max(5).nullable().optional(),
+  telemetryToken: z.union([z.string().max(20000), z.record(z.string(), z.unknown())]).optional(),
+  honeypotValue: z.string().max(1000).nullable().optional(),
 });
 
-const analyzeSchema = z.object({
-  text: z.string().min(1),
-  mode: z.enum(["strict", "balanced", "high_precision"]).default("balanced"),
-});
-
-const tenantModeSchema = z.object({
-  apiKey: z.string(),
-  mode: z.enum(["strict", "balanced", "high_precision"]),
-});
-
-/**
- * POST /v1/ingest
- * Synchronous bot telemetry verification (<2ms) and asynchronous job queuing.
- */
-apiRouter.post("/v1/ingest", async (c) => {
-  let body: any;
+apiRouter.use("/v1/*", bodyLimit({ maxSize: 128 * 1024 }));
+apiRouter.use("/v1/*", async (c, next) => {
+  const key = c.req.header("X-Shield-Key") || c.req.header("Authorization")?.replace(/^Bearer /, "");
+  if (!key) return c.json({ error: "Tenant API key required" }, 401);
   try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "Invalid JSON body" }, 400);
-  }
+    const [tenant] = await db.select().from(tenants).where(eq(tenants.apiKey, key));
+    if (!tenant) return c.json({ error: "Invalid tenant API key" }, 401);
+    c.set("tenant", tenant);
+  } catch { return c.json({ error: "Tenant service unavailable" }, 503); }
+  await next();
+});
 
+apiRouter.onError((err, c) => {
+  console.warn("Request failed:", err.message);
+  if (err instanceof ProviderHttpError) {
+    if (err.retryable) c.header("Retry-After", String(Math.ceil(err.retryAfterMs / 1000)));
+    return c.json({ error: err.message, reason: err.reason, providerStatus: err.status, retryable: err.retryable }, 503);
+  }
+  return c.json({ error: "Service temporarily unavailable; retry later" }, 503);
+});
+
+apiRouter.get("/v1/telemetry/key", c => c.json({ publicKey: getTelemetryPublicKey() }));
+
+apiRouter.get("/v1/honeypot/patterns", async c => {
+  const patterns = await sql`select h.pattern_cluster_id as "patternId", count(*)::int as count,
+    count(distinct s.author_session_hash)::int as "distinctAuthors", max(h.created_at) as "lastSeen"
+    from honeypot_vault h join submissions s on s.id = h.submission_id
+    where s.tenant_id = ${c.get("tenant").id} and h.created_at >= now() - interval '24 hours'
+    and h.pattern_cluster_id is not null group by h.pattern_cluster_id order by count(*) desc limit 100`;
+  return c.json({ patterns });
+});
+
+apiRouter.post("/v1/ingest", async c => {
+  const body = await c.req.json().catch(() => null);
   const parsed = ingestSchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid payload", details: parsed.error.issues }, 400);
-  }
+  if (!parsed.success) return c.json({ error: "Invalid payload", details: parsed.error.issues }, 400);
+  const tenant = c.get("tenant"), input = parsed.data;
+  if (!tenant.webhookSecret) return c.json({ error: "Tenant callback is not configured" }, 503);
+  const data = {
+    ...input, tenantId: tenant.id, thresholdMode: modeSchema.parse(tenant.thresholdMode),
+    botResult: evaluateBotTelemetry(input.telemetryToken || {}, input.honeypotValue),
+    // The integration forwards the original visitor metadata; the key authenticates the host.
+    ipAddress: c.req.header("X-Shield-Visitor-IP") || "unknown",
+    userAgent: c.req.header("X-Shield-Visitor-UA") || "unknown",
+  };
+  const [inserted] = await db.insert(evaluationJobs).values({ tenantId: tenant.id, wpCommentId: input.wpCommentId, data, queueName: evaluationQueueName() })
+    .onConflictDoNothing({ target: [evaluationJobs.tenantId, evaluationJobs.wpCommentId] }).returning({ id: evaluationJobs.id });
+  const [existing] = inserted ? [inserted] : await db.select({ id: evaluationJobs.id }).from(evaluationJobs)
+    .where(and(eq(evaluationJobs.tenantId, tenant.id), eq(evaluationJobs.wpCommentId, input.wpCommentId)));
+  // Accepted means durably saved. Redis recovery drains this outbox automatically.
+  void dispatchPendingJobs().catch(() => {});
+  return c.json({ status: "accepted", wpCommentId: input.wpCommentId, submissionId: existing!.id }, 202);
+});
 
-  const {
-    wpCommentId,
-    entityId,
-    entityTitle,
-    authorSessionHash,
-    rawText,
-    rating,
-    telemetryToken,
-    honeypotValue,
-    tenantApiKey,
-    wpWebhookUrl,
-    thresholdMode = "balanced",
-  } = parsed.data;
-
-  debugLog("API", `Received POST /v1/ingest for comment #${wpCommentId}`, {
-    entityId,
-    ip: c.req.header("x-forwarded-for") || "127.0.0.1",
-    userAgent: c.req.header("user-agent") || "unknown",
-    hasTelemetry: !!telemetryToken,
-    hasHoneypot: !!honeypotValue,
-  });
-
-  // 1. Synchronous Bot Telemetry & Honeypot Engine (<2ms)
-  const botResult = evaluateBotTelemetry(
-    telemetryToken || null,
-    honeypotValue || null
-  );
-
-  // Synchronous processing request (?sync=true) used for testing & fast path
-  const isSync = c.req.query("sync") === "true";
-
-  if (isSync) {
-    debugLog("API", `Processing comment #${wpCommentId} synchronously`);
-    const result = await processEvaluationJob({
-      wpCommentId,
-      entityId,
-      entityTitle,
-      authorSessionHash,
-      rawText,
-      rating,
-      botResult,
-      ipAddress: c.req.header("x-forwarded-for") || "127.0.0.1",
-      userAgent: c.req.header("user-agent") || "unknown",
-      wpWebhookUrl,
-      thresholdMode,
-    });
-    return c.json(result);
-  }
-
-  // 2. Headless bots detected immediately are shadowbanned synchronously
-  if (botResult.isBot) {
-    // Dispatch to background queue for recording honeypot vault & audit logs
-    const queue = getEvaluationQueue();
-    await queue.add("evaluate-comment", {
-      wpCommentId,
-      entityId,
-      entityTitle,
-      authorSessionHash,
-      rawText,
-      rating,
-      botResult,
-      ipAddress: c.req.header("x-forwarded-for") || "127.0.0.1",
-      userAgent: c.req.header("user-agent") || "unknown",
-      wpWebhookUrl,
-      thresholdMode,
-    });
-
-    return c.json({
-      status: "processed",
-      wpCommentId,
-      authorType: "bot",
-      visibility: "shadowbanned",
-      hasBanner: false,
-      banner: null,
-    });
-  }
-
-  // 3. Human submissions are enqueued to BullMQ worker (<5ms response time)
-  const queue = getEvaluationQueue();
-  await queue.add("evaluate-comment", {
-    wpCommentId,
-    entityId,
-    entityTitle,
-    authorSessionHash,
-    rawText,
-    rating,
-    botResult,
-    ipAddress: c.req.header("x-forwarded-for") || "127.0.0.1",
-    userAgent: c.req.header("user-agent") || "unknown",
-    wpWebhookUrl,
-    thresholdMode,
-  });
-
+apiRouter.post("/v1/analyze", async c => {
+  const parsed = z.object({ text: z.string().trim().min(1).max(50000), mode: modeSchema.optional() }).safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "Invalid payload", details: parsed.error.issues }, 400);
+  const mode = parsed.data.mode || modeSchema.parse(c.get("tenant").thresholdMode);
+  const result = await analyzeText(parsed.data.text, mode);
   return c.json({
-    status: "queued",
-    wpCommentId,
-    authorType: "human",
-    visibility: "pending",
-    hasBanner: false,
-    banner: null,
+    risk_score: result.riskScore, shield_flags: result.shieldFlags, route: result.route,
+    visibility: result.visibility, model_used: result.modelUsed,
+    failed_risk_ids: result.failedRiskIds, triggered_shield_ids: result.triggeredShieldIds,
+    synergy_bonus_applied: result.synergyBonusApplied, bucket1_cap_applied: result.bucket1CapApplied,
+    override_triggered: result.overrideTriggered, deep_research_explanation: result.deepResearchExplanation,
+    research_evidence: result.researchEvidence,
   });
 });
 
-/**
- * POST /v1/analyze
- * Direct standalone text evaluation pipeline for testing & real-time checking.
- */
-apiRouter.post("/v1/analyze", async (c) => {
-  let body: any;
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "Invalid JSON body" }, 400);
-  }
+apiRouter.patch("/v1/tenant/mode", async c => {
+  const parsed = z.object({ mode: modeSchema }).safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "Invalid payload" }, 400);
+  await db.update(tenants).set({ thresholdMode: parsed.data.mode }).where(eq(tenants.id, c.get("tenant").id));
+  return c.json({ status: "updated", mode: parsed.data.mode });
+});
 
-  const parsed = analyzeSchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid payload", details: parsed.error.issues }, 400);
-  }
-
-  const { text, mode } = parsed.data;
-
-  debugLog("API", `Received POST /v1/analyze (mode: ${mode})`, {
-    textLength: text.length,
-    textPreview: text.length > 80 ? text.substring(0, 80) + "..." : text,
-  });
-
-  // Stage 1: Fast Screener Jev
-  const jevResult = await screenWithJev(text);
-
-  // SemEval Deterministic Scorer
-  const scoreRes = evaluateSemEvalBitmask({
-    triggeredIds: jevResult.triggeredIds,
-    mode,
-  });
-
-  let explanation: string | null = null;
-  let modelUsed = jevResult.modelUsed;
-
-  // Stage 2: Heavy Forensic & Stance Grounding (gemini-4-hydrogen)
-  if (scoreRes.escalateToHydrogen) {
-    const heavyResult = await verifyStanceOrForensic(
-      text,
-      scoreRes.route === "ROUTE_3_STANCE_VERIFICATION"
-        ? "ROUTE_3_STANCE_VERIFICATION"
-        : "ROUTE_4_FORENSIC_THREAT",
-      scoreRes.failedRiskIds
-    );
-
-    if (scoreRes.route === "ROUTE_3_STANCE_VERIFICATION" && !heavyResult.endorsed) {
-      explanation = null;
-      scoreRes.route = "ROUTE_2_SHIELDED_CLEAR";
-    } else {
-      explanation = heavyResult.deepResearchExplanation;
-    }
-    modelUsed = heavyResult.modelUsed;
-  }
-
-  debugDecision("API", `/v1/analyze completed with route ${scoreRes.route}`, {
-    route: scoreRes.route,
-    modelUsed,
-    riskScore: scoreRes.riskScore,
-    shieldFlags: scoreRes.shieldFlags,
-    failedRiskIds: scoreRes.failedRiskIds,
-    hasExplanation: !!explanation,
-  });
-
+apiRouter.get("/v1/submissions/:id", async c => {
+  if (!z.uuid().safeParse(c.req.param("id")).success) return c.json({ error: "Invalid submission ID" }, 400);
+  const [job] = await db.select().from(evaluationJobs).where(and(eq(evaluationJobs.id, c.req.param("id")), eq(evaluationJobs.tenantId, c.get("tenant").id)));
+  if (!job) return c.json({ error: "Submission not found" }, 404);
   return c.json({
-    route: scoreRes.route,
-    risk_score: scoreRes.riskScore,
-    shield_flags: scoreRes.shieldFlags,
-    failed_risk_ids: scoreRes.failedRiskIds,
-    triggered_shield_ids: scoreRes.triggeredShieldIds,
-    escalate_to_hydrogen: scoreRes.escalateToHydrogen,
-    deep_research_explanation: explanation,
-    model_used: modelUsed,
+    status: job.deliveredAt ? "delivered" : job.retryPausedAt ? "needs_attention" : job.nextAttemptAt && job.nextAttemptAt.getTime() > Date.now() ? "retry_scheduled" : job.result ? "awaiting_callback" : "pending",
+    result: job.result, failureCount: job.failureCount, nextAttemptAt: job.nextAttemptAt,
+    retryPaused: !!job.retryPausedAt, lastError: job.lastError,
+    retryPhase: job.deliveredAt ? "review_context" : "evaluation",
   });
 });
 
-/**
- * PATCH /v1/tenant/mode
- * Admin toggle for changing the tenant's threshold sensitivity mode.
- */
-apiRouter.patch("/v1/tenant/mode", async (c) => {
-  let body: any;
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "Invalid JSON body" }, 400);
+apiRouter.post("/v1/submissions/:id/retry", async c => {
+  if (!z.uuid().safeParse(c.req.param("id")).success) return c.json({ error: "Invalid submission ID" }, 400);
+  const [job] = await db.select().from(evaluationJobs).where(and(eq(evaluationJobs.id, c.req.param("id")), eq(evaluationJobs.tenantId, c.get("tenant").id)));
+  if (!job) return c.json({ error: "Submission not found" }, 404);
+  if (job.deliveredAt && job.contextCompletedAt) return c.json({ status: "already_complete" });
+  await db.update(evaluationJobs).set({ failureCount: 0, nextAttemptAt: null, retryPausedAt: null, lastError: null }).where(eq(evaluationJobs.id, job.id));
+  const queued = await getEvaluationQueue()?.getJob(job.deliveredAt ? `review-${job.id}` : job.id);
+  if (queued) {
+    const state = await queued.getState();
+    if (state === "delayed") await queued.promote();
+    else if (state === "failed") await queued.retry();
   }
-
-  const parsed = tenantModeSchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid payload", details: parsed.error.issues }, 400);
-  }
-
-  debugDecision("API", `Tenant threshold mode updated to ${parsed.data.mode}`, {
-    apiKey: parsed.data.apiKey,
-    newMode: parsed.data.mode,
-  });
-
-  try {
-    const [updated] = await db
-      .update(tenants)
-      .set({ thresholdMode: parsed.data.mode })
-      .where(eq(tenants.apiKey, parsed.data.apiKey))
-      .returning();
-
-    if (!updated) {
-      return c.json({ error: "Tenant not found" }, 404);
-    }
-
-    return c.json({ status: "updated", tenant: updated });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
+  void dispatchPendingJobs().catch(() => {});
+  return c.json({ status: "retry_scheduled", submissionId: job.id }, 202);
 });
 
-async function handleGetBanner(c: any) {
-  const entityId = c.req.param("id");
-  debugLog("API", `Banner requested for entity: ${entityId}`);
-
-  try {
-    const [banner] = await db
-      .select()
-      .from(entityBanners)
-      .where(eq(entityBanners.entityId, entityId));
-
-    if (banner) {
-      debugLog("API", `Found banner for ${entityId} in DB: ${banner.anomalyStatus}`);
-      return c.json(banner);
-    }
-  } catch {
-    // If DB has error, check in-memory cache
-  }
-
-  const cached = inMemoryBanners.get(entityId);
-  if (cached) {
-    debugLog("API", `Found banner for ${entityId} in memory: ${cached.anomalyStatus}`);
-    return c.json(cached);
-  }
-
-  return c.json({ entityId, anomalyStatus: "normal", bannerExplanation: null });
-}
-
-/**
- * GET /v1/entity/:id/banner and GET /v1/banner/:id
- * Retrieves entity banner status.
- */
-apiRouter.get("/v1/entity/:id/banner", handleGetBanner);
-apiRouter.get("/v1/banner/:id", handleGetBanner);
+apiRouter.get("/v1/entity/:id/banner", async c => {
+  const [banner] = await db.select().from(entityBanners).where(and(eq(entityBanners.tenantId, c.get("tenant").id), eq(entityBanners.entityId, c.req.param("id"))));
+  const fresh = banner && banner.updatedAt.getTime() > Date.now() - 6 * 3600000;
+  return c.json(fresh ? banner : { entityId: c.req.param("id"), anomalyStatus: "normal", bannerExplanation: null, sources: [] });
+});
