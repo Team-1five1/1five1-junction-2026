@@ -145,7 +145,7 @@ app.get("/", (c) => {
 if (import.meta.main) startWorker();
 
 export default {
-  hostname: process.env.HOST || "127.0.0.1",
+  hostname: process.env.HOST || "0.0.0.0",
   port: PORT,
   fetch: app.fetch,
 };

@@ -9,23 +9,51 @@ Comments are stored in WordPress immediately and remain author-only while proces
 Requires Bun and Docker Compose.
 
 ```sh
+# 1. Install dependencies
 bun install
+
+# 2. Copy and configure environment variables
 cp .env.example .env
-# Configure HOSTINGER_AI_API_KEY, CONTEXT_DEV_API_KEY, and non-placeholder tenant/webhook secrets.
+# Set HOSTINGER_AI_API_KEY and CONTEXT_DEV_API_KEY in .env
+
+# 3. Start local Docker services (PostgreSQL, Redis, WordPress, MariaDB)
 docker compose up -d
+
+# 4. Push database schema migrations
 bun run db:migrate
-bun run tenant:provision
+
+# 5. Connect and initialize WordPress (installs WP if needed, activates plugin, syncs tenant secrets)
+bun run wordpress:connect
+
+# 6. Start the Verius Bun development server & telemetry dashboard
 bun run dev
 ```
 
-Configure **Settings → Verius** in WordPress:
+### Local Dev Architecture & Port Mappings
 
-- Backend URL: `http://host.docker.internal:4000` when WordPress runs in Docker and Bun runs on the host. Set `HOST=0.0.0.0` in local `.env` for this arrangement.
-- Tenant API key and webhook secret: exactly the values used for provisioning.
-- WordPress callback: set `WP_DEFAULT_WEBHOOK_URL` before provisioning to the URL reachable **from Bun**, usually `http://127.0.0.1:8080/wp-json/shield/v1/webhook`.
-- Choose strict, balanced, or high precision. Saving settings synchronizes the mode to the backend.
+In the default local development setup, Bun runs on the host while WordPress and supporting databases run inside Docker:
 
-For an already configured local Docker WordPress installation, `bun run wordpress:connect` provisions its existing credentials in PostgreSQL and generates the persistent telemetry key without printing secrets.
+- **Verius Backend & Telemetry Dashboard**: `http://localhost:4000` (listens on `0.0.0.0:4000` so Docker containers can reach it at `http://host.docker.internal:4000`).
+- **WordPress Site**: `http://localhost:8080` (Default credentials created by `wordpress:connect`: username `admin`, password `admin_password_2026`).
+- **PostgreSQL**: Bound to `127.0.0.1:5433` (mapped from container 5432 to avoid conflicts with local PostgreSQL).
+- **Redis**: Bound to `127.0.0.1:6380` (mapped from container 6379 to avoid conflicts with local Redis).
+
+### Automatic WordPress Connection (`bun run wordpress:connect`)
+
+Running `bun run wordpress:connect` provisions the local Docker environment in one command:
+1. Verifies the WordPress container is reachable (with automatic retry).
+2. If WordPress is freshly launched and uninstalled, it automatically installs WordPress with dev credentials (`admin` / `admin_password_2026`).
+3. Automatically activates the `shield-guard` plugin in WordPress.
+4. Sets the WordPress Backend API URL to `http://host.docker.internal:4000`.
+5. Synchronizes the tenant API key, HMAC callback secret, and callback URL (`http://localhost:8080/index.php?rest_route=/shield/v1/webhook`) between WordPress and the PostgreSQL `tenants` table.
+6. Generates the telemetry RSA encryption keypair in `keys/telemetry-private.pem`.
+
+### Manual WordPress Configuration (Optional)
+
+If you prefer to configure **Settings → Verius** manually in WordPress:
+- **Bun Core API URL**: `http://host.docker.internal:4000` (must be `host.docker.internal` so the WordPress container can reach Bun on the host).
+- **Tenant API Key & Shared Webhook Secret**: Values configured in `.env` or in the PostgreSQL `tenants` table.
+- **Detection Sensitivity Mode**: Choose `strict`, `balanced` (default), or `high_precision`.
 
 Serve the public WordPress site over HTTPS (localhost also works) so Web Crypto can encrypt telemetry. The plugin fetches only the backend public key; the RSA private key stays in ignored `keys/`. The browser uses a fresh AES-GCM key and nonce for each token, wrapped with RSA-OAEP. Missing telemetry alone does not classify someone as a bot. Exclude protected comment/review pages from any reverse-proxy page cache; the plugin sets WordPress no-cache headers and partitions comment query caches by session.
 
