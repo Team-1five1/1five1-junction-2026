@@ -342,6 +342,200 @@ const STATIC_GLOSSARY: Record<string, Omit<GlossaryEntry, "rawKey">> = {
     category: "Network Infrastructure",
     description: "Home internet connection hijacked into a proxy botnet used to disguise automated spam traffic.",
   },
+
+  // Swarm Campaign Types
+  COORDINATED_REVIEW_BOMB: {
+    title: "Coordinated Review Bomb",
+    category: "Swarm Threat Campaign",
+    description:
+      "A synchronized multi-account network flooding fake positive reviews or targeted negative ratings across products within narrow timeframes.",
+  },
+  ASTROTURF_PROPAGANDA: {
+    title: "Astroturf Propaganda",
+    category: "Swarm Threat Campaign",
+    description:
+      "A coordinated network of synthetic personas posting synchronized ideological or promotional narratives disguised as organic public consensus.",
+  },
+  SCRAPER_AMPLIFICATION: {
+    title: "Scraper Amplification",
+    category: "Swarm Threat Campaign",
+    description:
+      "An automated network combining bulk content scraping with synthetic engagement loops to artificially boost visibility or promote stolen assets.",
+  },
+  BOT_SWARM: {
+    title: "Automated Bot Swarm",
+    category: "Swarm Threat Campaign",
+    description:
+      "A synchronized bot cluster executing scripted actions across multiple accounts sharing identical subnet pools, timing cadences, or browser fingerprints.",
+  },
+
+  // Swarm Account Roles
+  ORIGINATOR: {
+    title: "Campaign Originator",
+    category: "Swarm Account Role",
+    description:
+      "The root seed account that published the initial attack message, campaign URL, or coordination token before downstream amplifiers boosted it.",
+  },
+  AMPLIFIER: {
+    title: "Bot Amplifier",
+    category: "Swarm Account Role",
+    description:
+      "A subordinate bot or sockpuppet account tasked with boosting, retweeting, or replying to the originator's post to manufacture fake social consensus.",
+  },
+  COORDINATED_NODE: {
+    title: "Coordinated Swarm Node",
+    category: "Swarm Account Role",
+    description:
+      "An account exhibiting correlated submission timing, semantic phrasing reuse, or shared network fingerprints with the broader attack network.",
+  },
+
+  // Swarm Intelligence UI Concepts
+  amplification_chain: {
+    title: "Amplification Chain",
+    category: "Swarm Intelligence",
+    description:
+      "Traces the propagation path from root seed originators to downstream amplifier accounts, measuring reply cascades and viral spreading velocity.",
+  },
+  account_similarity: {
+    title: "Account & Device Fingerprint Signals",
+    category: "Swarm Intelligence",
+    description:
+      "Measures statistical similarity across usernames (e.g. shared naming schemes), synchronized registration batches, and device fingerprint reuse.",
+  },
+  server_log_bridge: {
+    title: "Server Log Correlation (Clean Traffic Bridge)",
+    category: "Swarm Intelligence",
+    description:
+      "Cross-references comment-posting bot accounts with backend web-server access logs to uncover shared proxy subnets and brute-force IPs.",
+  },
+  coordination_graph: {
+    title: "Multi-Account Coordination Graph",
+    category: "Swarm Intelligence",
+    description:
+      "Interactive network topology mapping collaborative links between accounts based on timing synchrony, text similarity, and subnet proximity.",
+  },
+
+  // Clean the Traffic Classifications & Distributed Threats
+  CLEAN_HUMAN: {
+    title: "Verified Clean Human",
+    category: "Traffic Classification",
+    description:
+      "Legitimate human visitor exhibiting natural page browsing, organic asset loading (CSS, JS, images), and realistic navigation cadences.",
+  },
+  HUMAN_VISITOR: {
+    title: "Verified Clean Human",
+    category: "Traffic Classification",
+    description:
+      "Legitimate human visitor exhibiting natural page browsing, organic asset loading (CSS, JS, images), and realistic navigation cadences.",
+  },
+  VERIFIED_BOT: {
+    title: "Verified Search Engine Bot",
+    category: "Traffic Classification",
+    description:
+      "Legitimate search crawler (e.g. Googlebot, Bingbot) validated via two-way reverse DNS lookup against official search engine hostnames.",
+  },
+  AI_SCRAPER: {
+    title: "Commercial AI Scraper",
+    category: "Traffic Classification",
+    description:
+      "Automated commercial AI data collector (e.g. GPTBot, ClaudeBot, Bytespider, CCBot) scraping content for LLM training or retrieval.",
+  },
+  AI_CRAWLER: {
+    title: "Commercial AI Scraper",
+    category: "Traffic Classification",
+    description:
+      "Automated commercial AI data collector (e.g. GPTBot, ClaudeBot, Bytespider, CCBot) scraping content for LLM training or retrieval.",
+  },
+  SPOOFED_CRAWLER: {
+    title: "Spoofed Search Crawler",
+    category: "Traffic Classification",
+    description:
+      "Malicious bot claiming a legitimate search engine User-Agent (e.g. Googlebot) but failing reverse DNS verification.",
+  },
+  SPOOFED_BOT: {
+    title: "Spoofed Search Crawler",
+    category: "Traffic Classification",
+    description:
+      "Malicious bot claiming a legitimate search engine User-Agent (e.g. Googlebot) but failing reverse DNS verification.",
+  },
+  CONTENT_SCRAPER: {
+    title: "Aggressive Content Scraper",
+    category: "Traffic Classification",
+    description:
+      "High-volume automated script scraping articles, products, or reviews without requesting client assets or respecting crawl policies.",
+  },
+  SCRAPER: {
+    title: "Aggressive Content Scraper",
+    category: "Traffic Classification",
+    description:
+      "High-volume automated script scraping articles, products, or reviews without requesting client assets or respecting crawl policies.",
+  },
+  CREDENTIAL_STUFFING: {
+    title: "Credential Stuffing Campaign",
+    category: "Distributed Attack Campaign",
+    description:
+      "Automated distributed botnet hammering login endpoints (e.g. /wp-login.php, /api/auth) with stolen credential dumps.",
+  },
+  CREDENTIAL_STUFFER: {
+    title: "Credential Stuffing Attacker",
+    category: "Traffic Classification",
+    description:
+      "Automated bot hammering authentication endpoints with leaked username and password dictionaries.",
+  },
+  DISTRIBUTED_CREDENTIAL_STUFFING: {
+    title: "Distributed Credential Stuffing",
+    category: "Distributed Attack Campaign",
+    description:
+      "Coordinated botnet hammering login endpoints across multiple rotating IP addresses and proxy nodes to evade per-IP rate limits.",
+  },
+  DISTRIBUTED_SCRAPER_BOTNET: {
+    title: "Distributed Scraper Botnet",
+    category: "Distributed Attack Campaign",
+    description:
+      "Low-and-slow scraping attack dispersed across multiple proxy IPs and residential ASNs to evade single-IP rate limits.",
+  },
+  ACCOUNT_TAKEOVER_ALERT: {
+    title: "Account Takeover (ATO) Threat",
+    category: "Distributed Attack Campaign",
+    description:
+      "High-frequency authentication failures across multiple accounts indicating active credential testing and unauthorized account takeover attempts.",
+  },
+  COORDINATED_VULN_SCAN: {
+    title: "Coordinated Vulnerability Scan",
+    category: "Distributed Attack Campaign",
+    description:
+      "Distributed reconnaissance scanning multiple endpoints for exposed environment files (.env), backup SQL archives, and sensitive server configs.",
+  },
+  VULNERABILITY_PROBING: {
+    title: "Vulnerability & Exploit Probing",
+    category: "Traffic Classification",
+    description:
+      "Automated scanners searching for exposed configuration files (.env, wp-config.php), admin portals, or unpatched vulnerabilities.",
+  },
+  VULNERABILITY_SCANNER: {
+    title: "Vulnerability & Exploit Prober",
+    category: "Traffic Classification",
+    description:
+      "Automated scanner probing for known exploits, administrative interfaces, and unpatched web application vulnerabilities.",
+  },
+  DOS_FLOOD: {
+    title: "Denial of Service Flood",
+    category: "Traffic Classification",
+    description:
+      "Rapid burst of high-frequency HTTP requests designed to saturate web-server worker threads and exhaust database connections.",
+  },
+  DOS_FLOODER: {
+    title: "Denial of Service Flooder",
+    category: "Traffic Classification",
+    description:
+      "Rapid burst of high-frequency HTTP requests designed to saturate web-server worker threads and exhaust database connections.",
+  },
+  waf_export_rules: {
+    title: "Web Application Firewall (WAF) Rules",
+    category: "Firewall Defense",
+    description:
+      "Auto-generated firewall configuration rules ready to drop into Nginx, Apache, or Cloudflare to reject malicious scrapers and attackers at the edge.",
+  },
 };
 
 /**

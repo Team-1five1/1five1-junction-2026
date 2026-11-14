@@ -1973,9 +1973,11 @@ export function DashboardApp() {
                               >
                                 {swarm.threatLevel} THREAT
                               </Badge>
-                              <Badge variant="outline" className="text-xs font-mono">
-                                {swarm.campaignType.replace(/_/g, " ")}
-                              </Badge>
+                              <HoverExplanation rawKey={swarm.campaignType}>
+                                <Badge variant="outline" className="text-xs font-mono cursor-help">
+                                  {swarm.campaignType.replace(/_/g, " ")} ⓘ
+                                </Badge>
+                              </HoverExplanation>
                             </div>
                             <CardDescription className="text-xs font-mono text-muted-foreground">
                               Cluster ID: {swarm.id} &bull; {swarm.memberCount} member accounts &bull; {swarm.totalSubmissions} total submissions
@@ -2049,7 +2051,11 @@ export function DashboardApp() {
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                           {swarm.amplificationMetrics && (
                             <div className="rounded-lg border border-border p-3 bg-secondary/10">
-                              <div className="text-muted-foreground font-semibold">Amplification Chain</div>
+                              <HoverExplanation rawKey="amplification_chain">
+                                <div className="text-muted-foreground font-semibold cursor-help flex items-center justify-between">
+                                  <span>Amplification Chain ⓘ</span>
+                                </div>
+                              </HoverExplanation>
                               <div className="mt-1 font-mono font-bold text-foreground">
                                 {swarm.amplificationMetrics.originatorHandles && swarm.amplificationMetrics.originatorHandles.length > 1 ? (
                                   <>
@@ -2085,7 +2091,11 @@ export function DashboardApp() {
 
                           {swarm.accountSimilarityMetrics && (
                             <div className="rounded-lg border border-border p-3 bg-secondary/10">
-                              <div className="text-muted-foreground font-semibold">Account &amp; Fingerprint Signals</div>
+                              <HoverExplanation rawKey="account_similarity">
+                                <div className="text-muted-foreground font-semibold cursor-help flex items-center justify-between">
+                                  <span>Account &amp; Fingerprint Signals ⓘ</span>
+                                </div>
+                              </HoverExplanation>
                               <div className="mt-1 font-mono font-bold text-foreground">
                                 Handle Sim: {Math.round((swarm.accountSimilarityMetrics.avgHandleSimilarity || 0) * 100)}% &bull; New Accts: {swarm.accountSimilarityMetrics.synchronizedNewAccountsCount || 0}
                               </div>
@@ -2098,7 +2108,11 @@ export function DashboardApp() {
                           )}
 
                           <div className="rounded-lg border border-destructive/30 p-3 bg-destructive/5">
-                            <div className="text-muted-foreground font-semibold">Server Log Correlation (Clean Traffic Bridge)</div>
+                            <HoverExplanation rawKey="server_log_bridge">
+                              <div className="text-muted-foreground font-semibold cursor-help flex items-center justify-between">
+                                <span>Server Log Correlation (Clean Traffic Bridge) ⓘ</span>
+                              </div>
+                            </HoverExplanation>
                             <div className="mt-1 font-mono font-bold text-destructive">
                               {swarm.correlatedTrafficThreats?.length > 0
                                 ? `${swarm.correlatedTrafficThreats.length} IP/Subnet Match(es)`
@@ -2165,9 +2179,11 @@ export function DashboardApp() {
                       {/* Visual Network Graph Representation */}
                       <div className="rounded-lg border border-border/80 bg-background/50 p-4">
                         <div className="flex items-center justify-between mb-3">
-                          <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
-                            🕸️ Multi-Account Coordination Graph ({swarm.graphNodes.length} Nodes, {swarm.graphEdges.length} Evidence Edges)
-                          </span>
+                          <HoverExplanation rawKey="coordination_graph">
+                            <span className="text-xs font-semibold text-foreground flex items-center gap-1.5 cursor-help">
+                              🕸️ Multi-Account Coordination Graph ({swarm.graphNodes.length} Nodes, {swarm.graphEdges.length} Evidence Edges) ⓘ
+                            </span>
+                          </HoverExplanation>
                           <span className="text-[11px] text-muted-foreground">
                             Connected by shared subnet (/24), synchronized timing bursts, and text similarity
                           </span>
@@ -2183,12 +2199,14 @@ export function DashboardApp() {
                               <span className="font-mono font-semibold">{node.label}</span>
                               <span className="text-muted-foreground">({node.country} - {node.ip})</span>
                               {node.role && node.role !== "COORDINATED_NODE" && (
-                                <Badge
-                                  variant={node.role === "ORIGINATOR" ? "destructive" : "secondary"}
-                                  className="text-[10px] px-1 py-0 h-4"
-                                >
-                                  {node.role}
-                                </Badge>
+                                <HoverExplanation rawKey={node.role}>
+                                  <Badge
+                                    variant={node.role === "ORIGINATOR" ? "destructive" : "secondary"}
+                                    className="text-[10px] px-1 py-0 h-4 cursor-help"
+                                  >
+                                    {node.role} ⓘ
+                                  </Badge>
+                                </HoverExplanation>
                               )}
                               {node.rating !== null && (
                                 <Badge variant="outline" className="text-[10px] px-1 py-0 h-4">
@@ -2419,85 +2437,101 @@ export function DashboardApp() {
               </CardHeader>
               <CardContent>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center text-xs">
-                  <div className="rounded-lg border border-success/30 bg-success/10 p-3">
-                    <div className="text-muted-foreground font-semibold">Real Visitors</div>
-                    <div className="text-lg font-bold text-success mt-1">
-                      {trafficData?.trafficBreakdown?.humanPercent ?? 0}%
+                  <HoverExplanation rawKey="CLEAN_HUMAN">
+                    <div className="rounded-lg border border-success/30 bg-success/10 p-3 cursor-help">
+                      <div className="text-muted-foreground font-semibold">Real Visitors ⓘ</div>
+                      <div className="text-lg font-bold text-success mt-1">
+                        {trafficData?.trafficBreakdown?.humanPercent ?? 0}%
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {trafficData?.trafficBreakdown?.humanCount ?? 0} hits
+                      </div>
                     </div>
-                    <div className="text-[11px] text-muted-foreground">
-                      {trafficData?.trafficBreakdown?.humanCount ?? 0} hits
-                    </div>
-                  </div>
+                  </HoverExplanation>
 
-                  <div className="rounded-lg border border-primary/30 bg-primary/10 p-3">
-                    <div className="text-muted-foreground font-semibold">Verified Bots</div>
-                    <div className="text-lg font-bold text-primary mt-1">
-                      {trafficData?.trafficBreakdown?.verifiedBotPercent ?? 0}%
+                  <HoverExplanation rawKey="VERIFIED_BOT">
+                    <div className="rounded-lg border border-primary/30 bg-primary/10 p-3 cursor-help">
+                      <div className="text-muted-foreground font-semibold">Verified Bots ⓘ</div>
+                      <div className="text-lg font-bold text-primary mt-1">
+                        {trafficData?.trafficBreakdown?.verifiedBotPercent ?? 0}%
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {trafficData?.trafficBreakdown?.verifiedBotCount ?? 0} hits
+                      </div>
                     </div>
-                    <div className="text-[11px] text-muted-foreground">
-                      {trafficData?.trafficBreakdown?.verifiedBotCount ?? 0} hits
-                    </div>
-                  </div>
+                  </HoverExplanation>
 
-                  <div className="rounded-lg border border-warning/30 bg-warning/10 p-3">
-                    <div className="text-muted-foreground font-semibold">AI Crawlers</div>
-                    <div className="text-lg font-bold text-warning mt-1">
-                      {trafficData?.trafficBreakdown?.aiCrawlerPercent ?? 0}%
+                  <HoverExplanation rawKey="AI_SCRAPER">
+                    <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 cursor-help">
+                      <div className="text-muted-foreground font-semibold">AI Crawlers ⓘ</div>
+                      <div className="text-lg font-bold text-warning mt-1">
+                        {trafficData?.trafficBreakdown?.aiCrawlerPercent ?? 0}%
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {trafficData?.trafficBreakdown?.aiCrawlerCount ?? 0} hits
+                      </div>
                     </div>
-                    <div className="text-[11px] text-muted-foreground">
-                      {trafficData?.trafficBreakdown?.aiCrawlerCount ?? 0} hits
-                    </div>
-                  </div>
+                  </HoverExplanation>
 
-                  <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3">
-                    <div className="text-muted-foreground font-semibold">Spoofed Crawlers</div>
-                    <div className="text-lg font-bold text-destructive mt-1">
-                      {trafficData?.trafficBreakdown?.spoofedBotPercent ?? 0}%
+                  <HoverExplanation rawKey="SPOOFED_CRAWLER">
+                    <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 cursor-help">
+                      <div className="text-muted-foreground font-semibold">Spoofed Crawlers ⓘ</div>
+                      <div className="text-lg font-bold text-destructive mt-1">
+                        {trafficData?.trafficBreakdown?.spoofedBotPercent ?? 0}%
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {trafficData?.trafficBreakdown?.spoofedBotCount ?? 0} hits
+                      </div>
                     </div>
-                    <div className="text-[11px] text-muted-foreground">
-                      {trafficData?.trafficBreakdown?.spoofedBotCount ?? 0} hits
-                    </div>
-                  </div>
+                  </HoverExplanation>
 
-                  <div className="rounded-lg border border-warning/30 bg-warning/10 p-3">
-                    <div className="text-muted-foreground font-semibold">Content Scrapers</div>
-                    <div className="text-lg font-bold text-warning mt-1">
-                      {trafficData?.trafficBreakdown?.scraperPercent ?? 0}%
+                  <HoverExplanation rawKey="CONTENT_SCRAPER">
+                    <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 cursor-help">
+                      <div className="text-muted-foreground font-semibold">Content Scrapers ⓘ</div>
+                      <div className="text-lg font-bold text-warning mt-1">
+                        {trafficData?.trafficBreakdown?.scraperPercent ?? 0}%
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {trafficData?.trafficBreakdown?.scraperCount ?? 0} hits
+                      </div>
                     </div>
-                    <div className="text-[11px] text-muted-foreground">
-                      {trafficData?.trafficBreakdown?.scraperCount ?? 0} hits
-                    </div>
-                  </div>
+                  </HoverExplanation>
 
-                  <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3">
-                    <div className="text-muted-foreground font-semibold">Credential Stuffers</div>
-                    <div className="text-lg font-bold text-destructive mt-1">
-                      {trafficData?.trafficBreakdown?.credentialStufferPercent ?? 0}%
+                  <HoverExplanation rawKey="CREDENTIAL_STUFFING">
+                    <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 cursor-help">
+                      <div className="text-muted-foreground font-semibold">Credential Stuffers ⓘ</div>
+                      <div className="text-lg font-bold text-destructive mt-1">
+                        {trafficData?.trafficBreakdown?.credentialStufferPercent ?? 0}%
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {trafficData?.trafficBreakdown?.credentialStufferCount ?? 0} hits
+                      </div>
                     </div>
-                    <div className="text-[11px] text-muted-foreground">
-                      {trafficData?.trafficBreakdown?.credentialStufferCount ?? 0} hits
-                    </div>
-                  </div>
+                  </HoverExplanation>
 
-                  <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3">
-                    <div className="text-muted-foreground font-semibold">Exploit Probers</div>
-                    <div className="text-lg font-bold text-destructive mt-1">
-                      {trafficData?.trafficBreakdown?.vulnerabilityScannerPercent ?? 0}%
+                  <HoverExplanation rawKey="VULNERABILITY_PROBING">
+                    <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 cursor-help">
+                      <div className="text-muted-foreground font-semibold">Exploit Probers ⓘ</div>
+                      <div className="text-lg font-bold text-destructive mt-1">
+                        {trafficData?.trafficBreakdown?.vulnerabilityScannerPercent ?? 0}%
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {trafficData?.trafficBreakdown?.vulnerabilityScannerCount ?? 0} hits
+                      </div>
                     </div>
-                    <div className="text-[11px] text-muted-foreground">
-                      {trafficData?.trafficBreakdown?.vulnerabilityScannerCount ?? 0} hits
-                    </div>
-                  </div>
+                  </HoverExplanation>
 
-                  <div className="rounded-lg border border-border bg-secondary/30 p-3">
-                    <div className="text-muted-foreground font-semibold">DoS Flooders</div>
-                    <div className="text-lg font-bold text-foreground mt-1">
-                      {trafficData?.trafficBreakdown?.dosFlooderPercent ?? 0}%
+                  <HoverExplanation rawKey="DOS_FLOOD">
+                    <div className="rounded-lg border border-border bg-secondary/30 p-3 cursor-help">
+                      <div className="text-muted-foreground font-semibold">DoS Flooders ⓘ</div>
+                      <div className="text-lg font-bold text-foreground mt-1">
+                        {trafficData?.trafficBreakdown?.dosFlooderPercent ?? 0}%
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {trafficData?.trafficBreakdown?.dosFlooderCount ?? 0} hits
+                      </div>
                     </div>
-                    <div className="text-[11px] text-muted-foreground">
-                      {trafficData?.trafficBreakdown?.dosFlooderCount ?? 0} hits
-                    </div>
-                  </div>
+                  </HoverExplanation>
                 </div>
               </CardContent>
             </Card>
@@ -2704,9 +2738,11 @@ export function DashboardApp() {
                     >
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex items-center gap-2">
-                          <Badge variant="destructive" className="text-[10px]">
-                            {camp.type.replace(/_/g, " ")}
-                          </Badge>
+                          <HoverExplanation rawKey={camp.type}>
+                            <Badge variant="destructive" className="text-[10px] cursor-help">
+                              {camp.type.replace(/_/g, " ")} ⓘ
+                            </Badge>
+                          </HoverExplanation>
                           <span className="font-mono font-bold text-foreground">{camp.targetPath}</span>
                         </div>
                         <span className="font-mono text-muted-foreground">
@@ -2919,9 +2955,11 @@ export function DashboardApp() {
               <Card>
                 <CardHeader className="pb-3">
                   <div className="flex items-center justify-between">
-                    <CardTitle className="text-sm font-bold flex items-center gap-1.5">
-                      🛡️ Ready-to-Paste Nginx Block Configuration
-                    </CardTitle>
+                    <HoverExplanation rawKey="waf_export_rules">
+                      <CardTitle className="text-sm font-bold flex items-center gap-1.5 cursor-help">
+                        🛡️ Ready-to-Paste Nginx Block Configuration ⓘ
+                      </CardTitle>
+                    </HoverExplanation>
                     <Badge variant="outline" className="text-[10px] font-mono">nginx.conf</Badge>
                   </div>
                   <CardDescription className="text-xs">

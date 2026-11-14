@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
+import { getTagExplanation } from "../glossary";
 
 export function cn(...classes: Array<string | undefined | null | false>): string {
   return classes.filter(Boolean).join(" ");
@@ -587,8 +588,8 @@ export function Separator({ className }: { className?: string }) {
 // shadcn/ui HoverCard / HoverExplanation (1.2-second delayed explanation modal)
 // ---------------------------------------------------------------------------
 export interface HoverExplanationProps {
-  title: string;
-  description: string;
+  title?: string;
+  description?: string;
   category?: string;
   rawKey?: string;
   delayMs?: number;
@@ -597,14 +598,19 @@ export interface HoverExplanationProps {
 }
 
 export function HoverExplanation({
-  title,
-  description,
-  category,
+  title: propTitle,
+  description: propDescription,
+  category: propCategory,
   rawKey,
   delayMs = 1200,
   className,
   children,
 }: HoverExplanationProps) {
+  const glossaryEntry = rawKey ? getTagExplanation(rawKey) : null;
+  const title = propTitle || glossaryEntry?.title || rawKey || "";
+  const description = propDescription || glossaryEntry?.description || "";
+  const category = propCategory || glossaryEntry?.category;
+
   const [open, setOpen] = useState(false);
   const [isCharging, setIsCharging] = useState(false);
   const [coords, setCoords] = useState<{ top: number; left: number; placeAbove: boolean }>({
