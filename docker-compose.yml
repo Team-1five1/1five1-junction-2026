@@ -1,0 +1,82 @@
+services:
+  wordpress-db:
+    image: mariadb:11
+    container_name: wordpress-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: wp_root_password_2026
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wordpress
+      MYSQL_PASSWORD: wp_user_password_2026
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - app-net
+
+  wordpress:
+    image: wordpress:latest
+    container_name: wordpress-app
+    restart: unless-stopped
+    depends_on:
+      - wordpress-db
+    ports:
+      - "8080:80"
+    environment:
+      WORDPRESS_DB_HOST: wordpress-db:3306
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wp_user_password_2026
+      WORDPRESS_DB_NAME: wordpress
+    volumes:
+      - wp_data:/var/www/html
+    networks:
+      - app-net
+
+  bun-app:
+    image: oven/bun:latest
+    container_name: bun-app
+    restart: unless-stopped
+    working_dir: /app
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+    volumes:
+      - .:/app
+    command: sh -c "bun install && bun run --watch src/index.ts"
+    networks:
+      - app-net
+
+  auto-sync:
+    image: alpine/git:latest
+    container_name: git-auto-sync
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - .:/app
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "[git-sync] Watcher active. Monitoring origin/main every 15s..."
+        while true; do
+          git fetch origin main --quiet 2>/dev/null || true
+          LOCAL=$$(git rev-parse HEAD 2>/dev/null || echo "")
+          REMOTE=$$(git rev-parse origin/main 2>/dev/null || echo "")
+          if [ -n "$$LOCAL" ] && [ -n "$$REMOTE" ] && [ "$$LOCAL" != "$$REMOTE" ]; then
+            echo "[git-sync] New commit detected ($$LOCAL -> $$REMOTE). Pulling..."
+            git pull origin main
+            echo "[git-sync] Successfully updated to $$REMOTE"
+          fi
+          sleep 15
+        done
+    networks:
+      - app-net
+
+networks:
+  app-net:
+    driver: bridge
+
+volumes:
+  db_data:
+  wp_data:
