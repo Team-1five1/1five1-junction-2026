@@ -642,10 +642,15 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
 
   if (dbConnected) {
     try {
-      const existing = await sql`SELECT count(*)::int AS cnt FROM submissions`;
-      const count = existing[0]?.cnt ?? 0;
-      if (count > 0 && !force) {
-        return { seededCount: 0, source: "postgres" };
+      if (force) {
+        // Clear previous seed items first so re-seeding is clean and 100% deterministic
+        await sql`DELETE FROM submissions WHERE author_session_hash LIKE ${SEED_HASH_PREFIX + '%'}`;
+      } else {
+        const existing = await sql`SELECT count(*)::int AS cnt FROM submissions WHERE author_session_hash LIKE ${SEED_HASH_PREFIX + '%'}`;
+        const count = existing[0]?.cnt ?? 0;
+        if (count > 0) {
+          return { seededCount: 0, source: "postgres" };
+        }
       }
 
       let inserted = 0;
@@ -669,7 +674,7 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
         const [sub] = await db
           .insert(submissions)
           .values({
-            wpCommentId: item.wpCommentId + (force ? Math.floor(Math.random() * 1000) : 0),
+            wpCommentId: item.wpCommentId,
             entityId: item.entityId,
             authorSessionHash: taggedHash,
             rawText: item.rawText,
@@ -762,7 +767,11 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
   }
 
   // Fallback to in-memory seed if Postgres is unavailable
-  if (inMemorySubmissions.length > 0 && !force) {
+  if (force) {
+    const keep = inMemorySubmissions.filter((s) => !s.authorSessionHash.startsWith(SEED_HASH_PREFIX));
+    inMemorySubmissions.length = 0;
+    inMemorySubmissions.push(...keep);
+  } else if (inMemorySubmissions.some((s) => s.authorSessionHash.startsWith(SEED_HASH_PREFIX))) {
     return { seededCount: 0, source: "memory" };
   }
 
@@ -786,7 +795,7 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
 
     const record: InMemorySubmissionRecord = {
       id,
-      wpCommentId: item.wpCommentId + (force ? Math.floor(Math.random() * 1000) : 0),
+      wpCommentId: item.wpCommentId,
       entityId: item.entityId,
       authorSessionHash: taggedHash,
       rawText: item.rawText,
@@ -840,11 +849,15 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
   return { seededCount: memInserted, source: "memory" };
 }
 
-export async function clearDemoData(clearAll = false): Promise<{
+export type ClearMode = "seed" | "all" | "non-seed";
+
+export async function clearDemoData(mode: ClearMode | boolean = "seed"): Promise<{
   deletedCount: number;
   source: "postgres" | "memory";
 }> {
   userClearedSeed = true;
+  const clearMode: ClearMode =
+    typeof mode === "boolean" ? (mode ? "all" : "seed") : mode;
   const { dbConnected } = await ensureDashboardSchema();
 
   // Also clean in-memory mirror
@@ -852,25 +865,45 @@ export async function clearDemoData(clearAll = false): Promise<{
   for (let i = inMemorySubmissions.length - 1; i >= 0; i--) {
     const sub = inMemorySubmissions[i];
     if (!sub) continue;
-    if (clearAll || sub.authorSessionHash.startsWith(SEED_HASH_PREFIX)) {
+    const match =
+      clearMode === "all"
+        ? true
+        : clearMode === "non-seed"
+          ? !sub.authorSessionHash.startsWith(SEED_HASH_PREFIX)
+          : sub.authorSessionHash.startsWith(SEED_HASH_PREFIX);
+    if (match) {
       inMemoryHoneypot.delete(sub.id);
       inMemorySubmissions.splice(i, 1);
       memDeleted++;
     }
   }
-  inMemoryBanners.delete("product_quantum_router");
-  inMemoryBanners.delete("post_firmware_v4_2");
-  if (clearAll) {
+
+  if (clearMode === "all") {
     inMemoryBanners.clear();
+  } else if (clearMode === "seed") {
+    inMemoryBanners.delete("product_quantum_router");
+    inMemoryBanners.delete("post_firmware_v4_2");
   }
 
   if (dbConnected) {
     try {
       let deletedRows;
-      if (clearAll) {
+      if (clearMode === "all") {
         await sql`DELETE FROM honeypot_vault`;
         deletedRows = await sql`DELETE FROM submissions RETURNING id`;
         await sql`DELETE FROM entity_banners`;
+      } else if (clearMode === "non-seed") {
+        await sql`
+          DELETE FROM honeypot_vault
+          WHERE submission_id IN (
+            SELECT id FROM submissions WHERE author_session_hash NOT LIKE ${SEED_HASH_PREFIX + "%"}
+          )
+        `;
+        deletedRows = await sql`
+          DELETE FROM submissions
+          WHERE author_session_hash NOT LIKE ${SEED_HASH_PREFIX + "%"}
+          RETURNING id
+        `;
       } else {
         await sql`
           DELETE FROM honeypot_vault
@@ -1653,15 +1686,23 @@ dashboardApiRouter.post("/api/dashboard/seed", async (c) => {
 
 /**
  * DELETE /api/dashboard/seed
- * Deletes all seeded test data (rows with author_session_hash LIKE 'seed_demo_%')
- * without deleting real website comments, or wipes everything if ?all=true.
+ * Deletes seeded test data (default: seed_demo_%), or wipes everything (?all=true or ?mode=all),
+ * or deletes only non-seed comments (?mode=non-seed).
  */
 dashboardApiRouter.delete("/api/dashboard/seed", async (c) => {
+  const modeParam = c.req.query("mode") as ClearMode | undefined;
   const clearAll = c.req.query("all") === "true";
-  const res = await clearDemoData(clearAll);
+  const mode: ClearMode =
+    modeParam === "non-seed"
+      ? "non-seed"
+      : clearAll || modeParam === "all"
+        ? "all"
+        : "seed";
+  const res = await clearDemoData(mode);
   return c.json({
     status: "cleared",
-    clearAll,
+    mode,
+    clearAll: mode === "all",
     ...res,
   });
 });

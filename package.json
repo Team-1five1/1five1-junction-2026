@@ -16,6 +16,11 @@
     "verify:browser": "node scripts/verify-collector-browser.mjs",
     "seed": "bun run scripts/manage-test-data.ts seed",
     "seed:clear": "bun run scripts/manage-test-data.ts clear",
+    "clear": "bun run scripts/manage-test-data.ts clear --all",
+    "clear:all": "bun run scripts/manage-test-data.ts clear --all",
+    "clear:seed": "bun run scripts/manage-test-data.ts clear",
+    "clear:non-seed": "bun run scripts/manage-test-data.ts clear --non-seed",
+    "db:clear": "bun run scripts/manage-test-data.ts clear --all",
     "test:swarm": "bun ./scripts/test-bot-swarm.ts",
     "demo:honeypot": "bun ./scripts/demo-puppeteer-honeypot.ts",
     "test:honeypot-browser": "bun ./scripts/demo-puppeteer-honeypot.ts --headless"
