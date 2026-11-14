@@ -597,35 +597,6 @@ export async function ensureDashboardSchema(): Promise<{
       }
     }
 
-    // Backfill origin geo fields for any existing submissions missing country metadata
-    const missingOrigin = await sql`
-      SELECT s.id, s.wp_comment_id, s.author_session_hash, s.author_type, h.ip_address
-      FROM submissions s
-      LEFT JOIN honeypot_vault h ON h.submission_id = s.id
-      WHERE s.origin_country_code IS NULL
-      LIMIT 300
-    `;
-    for (const row of missingOrigin) {
-      const origin = resolveOriginGeo({
-        ipAddress: row.ip_address || null,
-        authorSessionHash: row.author_session_hash,
-        wpCommentId: Number(row.wp_comment_id),
-        authorType: row.author_type as "human" | "bot",
-      });
-      await sql`
-        UPDATE submissions
-        SET
-          origin_country_code = ${origin.countryCode},
-          origin_country = ${origin.countryName},
-          origin_region = ${origin.region},
-          origin_city = ${origin.city},
-          origin_lat = ${origin.lat},
-          origin_lng = ${origin.lng},
-          origin_network = ${origin.networkType}
-        WHERE id = ${row.id}
-      `;
-    }
-
     schemaChecked = true;
   } catch (err: any) {
     console.warn(`Schema check warning: ${err.message}`);
@@ -932,11 +903,6 @@ async function loadAllUnifiedSubmissions(): Promise<{
   pgvectorEnabled: boolean;
 }> {
   const status = await ensureDashboardSchema();
-
-  if (!initialSeedAttempted && !userClearedSeed) {
-    initialSeedAttempted = true;
-    await seedDemoData(false);
-  }
 
   if (status.dbConnected) {
     try {

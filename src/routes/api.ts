@@ -94,8 +94,9 @@ apiRouter.post("/v1/ingest", async c => {
     tenantId: tenant.id,
     thresholdMode: modeSchema.parse(tenant.thresholdMode),
     botResult: evaluateBotTelemetry(input.telemetryToken ?? "", input.honeypotValue),
-    ipAddress: c.req.header("X-Shield-Visitor-IP") || c.req.header("x-forwarded-for") || "127.0.0.1",
+    ipAddress: c.req.header("X-Shield-Visitor-IP") || c.req.header("cf-connecting-ip") || c.req.header("x-forwarded-for") || "127.0.0.1",
     userAgent: c.req.header("X-Shield-Visitor-UA") || c.req.header("user-agent") || "unknown",
+    countryHeader: c.req.header("cf-ipcountry") || c.req.header("x-country-code") || c.req.header("x-geo-country") || null,
   };
 
   if (c.req.query("sync") === "true") {

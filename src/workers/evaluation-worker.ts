@@ -239,6 +239,7 @@ export async function processEvaluationJob(data: EvaluationJobData) {
         authorSessionHash,
         wpCommentId,
         authorType: "bot",
+        countryHeader: (data as any).countryHeader || null,
       });
       const embedding = computeLocalEmbedding(rawText, []);
       let savedId: string | null = null;
@@ -368,6 +369,7 @@ export async function processEvaluationJob(data: EvaluationJobData) {
         authorSessionHash,
         wpCommentId,
         authorType: "bot",
+        countryHeader: (data as any).countryHeader || null,
       });
       const embedding = computeLocalEmbedding(rawText, []);
       let savedId: string | null = null;
@@ -466,6 +468,7 @@ export async function processEvaluationJob(data: EvaluationJobData) {
     authorSessionHash,
     wpCommentId,
     authorType: "human",
+    countryHeader: (data as any).countryHeader || null,
   });
   const embedding = computeLocalEmbedding(rawText, [
     ...result.failedRiskIds,

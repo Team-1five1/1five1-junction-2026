@@ -353,6 +353,24 @@ function stableHash(input: string): number {
   return h >>> 0;
 }
 
+function isLocalOrPrivateIp(ip: string): boolean {
+  if (!ip) return true;
+  const trimmed = ip.trim().toLowerCase();
+  return (
+    trimmed === "" ||
+    trimmed === "127.0.0.1" ||
+    trimmed === "::1" ||
+    trimmed === "localhost" ||
+    trimmed === "0.0.0.0" ||
+    trimmed === "unknown" ||
+    trimmed.startsWith("10.") ||
+    trimmed.startsWith("192.168.") ||
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(trimmed) ||
+    trimmed.startsWith("fc00:") ||
+    trimmed.startsWith("fe80:")
+  );
+}
+
 /**
  * Resolves origin country, macro-region, city coordinates, and network type
  * for any submission or bot telemetry record.
@@ -365,10 +383,12 @@ export function resolveOriginGeo(params: {
   authorType?: "human" | "bot";
 }): OriginGeoInfo {
   const cleanIp = (params.ipAddress || "").trim();
-  const cleanHash = (params.authorSessionHash || "").replace(/^seed_demo_/, "").trim();
+  const rawHash = (params.authorSessionHash || "").trim();
+  const isSeed = rawHash.startsWith("seed_demo_");
+  const cleanHash = rawHash.replace(/^seed_demo_/, "").trim();
   const upperCountry = (params.countryHeader || "").trim().toUpperCase();
 
-  // 1. Explicit country header (e.g., Cloudflare CF-IPCountry)
+  // 1. Explicit country header (e.g., Cloudflare CF-IPCountry or X-Country-Code)
   if (upperCountry && upperCountry in COUNTRY_CODE_TO_HUB) {
     const hub = GEO_HUBS[COUNTRY_CODE_TO_HUB[upperCountry]!]!;
     return {
@@ -385,8 +405,8 @@ export function resolveOriginGeo(params: {
     };
   }
 
-  // 2. Match known bot / relay IP prefixes
-  if (cleanIp && cleanIp !== "127.0.0.1" && cleanIp !== "unknown") {
+  // 2. Match known relay / honeypot IP prefixes (real public IP blocks only)
+  if (cleanIp && !isLocalOrPrivateIp(cleanIp)) {
     const matched = IP_PREFIX_MAP.find((m) => cleanIp.startsWith(m.prefix));
     if (matched) {
       const hub = GEO_HUBS[matched.hubKey]!;
@@ -405,8 +425,8 @@ export function resolveOriginGeo(params: {
     }
   }
 
-  // 3. Match known session hashes
-  if (cleanHash && cleanHash in HASH_ORIGIN_MAP) {
+  // 3. Match known seed session hashes (ONLY for seeded demo fixtures)
+  if (isSeed && cleanHash in HASH_ORIGIN_MAP) {
     const spec = HASH_ORIGIN_MAP[cleanHash]!;
     const hub = GEO_HUBS[spec.hubKey]!;
     return {
@@ -417,32 +437,63 @@ export function resolveOriginGeo(params: {
       city: hub.city,
       lat: hub.lat,
       lng: hub.lng,
-      ipAddress: cleanIp && cleanIp !== "127.0.0.1" ? cleanIp : hub.defaultIp,
+      ipAddress: cleanIp && !isLocalOrPrivateIp(cleanIp) ? cleanIp : hub.defaultIp,
       networkType: spec.networkOverride || hub.networkType,
       asnLabel: spec.asnOverride || hub.asnLabel,
     };
   }
 
-  // 4. Deterministic fallback across realistic threat/traffic hubs
-  const hubKeys =
-    params.authorType === "bot"
-      ? (["RU_MSK", "DE_FRA", "NL_AMS", "RO_BUH", "CN_SZX", "BR_GRU"] as const)
-      : (["RU_LED", "IR_THR", "US_IAD", "GB_LON", "FI_HEL", "SG_SIN"] as const);
-  const seedKey = `${cleanIp}|${cleanHash}|${params.wpCommentId || 0}`;
-  const chosenKey = hubKeys[stableHash(seedKey) % hubKeys.length]!;
-  const hub = GEO_HUBS[chosenKey]!;
+  // 4. Localhost / internal private networks: never fabricate foreign countries
+  if (isLocalOrPrivateIp(cleanIp) && !isSeed) {
+    return {
+      countryCode: "LOCAL",
+      countryName: "Localhost / Internal",
+      region: "Western & Central Europe",
+      regionCode: "region_western_europe",
+      city: "Localhost",
+      lat: 51.5074,
+      lng: 0.1278,
+      ipAddress: cleanIp || "127.0.0.1",
+      networkType: "internal_loopback",
+      asnLabel: "Local Development / Internal Network",
+    };
+  }
 
+  // 5. Seed fixture fallback (ONLY for explicitly seeded demo data with seed_demo_ prefix)
+  if (isSeed) {
+    const hubKeys =
+      params.authorType === "bot"
+        ? (["RU_MSK", "DE_FRA", "NL_AMS", "RO_BUH", "CN_SZX", "BR_GRU"] as const)
+        : (["RU_LED", "IR_THR", "US_IAD", "GB_LON", "FI_HEL", "SG_SIN"] as const);
+    const seedKey = `${cleanIp}|${cleanHash}|${params.wpCommentId || 0}`;
+    const chosenKey = hubKeys[stableHash(seedKey) % hubKeys.length]!;
+    const hub = GEO_HUBS[chosenKey]!;
+    return {
+      countryCode: hub.countryCode,
+      countryName: hub.countryName,
+      region: hub.region,
+      regionCode: hub.regionCode,
+      city: hub.city,
+      lat: hub.lat,
+      lng: hub.lng,
+      ipAddress: cleanIp && !isLocalOrPrivateIp(cleanIp) ? cleanIp : hub.defaultIp,
+      networkType: hub.networkType,
+      asnLabel: hub.asnLabel,
+    };
+  }
+
+  // 6. Real unclassified traffic without geo headers
   return {
-    countryCode: hub.countryCode,
-    countryName: hub.countryName,
-    region: hub.region,
-    regionCode: hub.regionCode,
-    city: hub.city,
-    lat: hub.lat,
-    lng: hub.lng,
-    ipAddress: cleanIp && cleanIp !== "127.0.0.1" && cleanIp !== "unknown" ? cleanIp : hub.defaultIp,
-    networkType: hub.networkType,
-    asnLabel: hub.asnLabel,
+    countryCode: "UNKNOWN",
+    countryName: "Direct / Unclassified",
+    region: "Western & Central Europe",
+    regionCode: "region_western_europe",
+    city: "Direct IP",
+    lat: 51.5074,
+    lng: 0.1278,
+    ipAddress: cleanIp || "unknown",
+    networkType: "direct_traffic",
+    asnLabel: "Direct / Unclassified Network",
   };
 }
 

@@ -212,8 +212,19 @@ const STATIC_GLOSSARY: Record<string, Omit<GlossaryEntry, "rawKey">> = {
     description:
       "Traffic originating from South American ISP ranges and compromised residential proxy nodes.",
   },
+  region_local: {
+    title: "Local & Internal",
+    category: "Geographic Region",
+    description:
+      "Submissions originating from localhost, loopback interfaces (127.0.0.1), or private development environments.",
+  },
 
   // Origin Countries
+  country_LOCAL: {
+    title: "Localhost / Internal (LOCAL)",
+    category: "Origin Network",
+    description: "Traffic originating from local development loopback (127.0.0.1) or private intranet.",
+  },
   country_RU: {
     title: "Russia (RU)",
     category: "Origin Country",
@@ -281,6 +292,16 @@ const STATIC_GLOSSARY: Record<string, Omit<GlossaryEntry, "rawKey">> = {
   },
 
   // Origin Network Types
+  internal_loopback: {
+    title: "Localhost / Loopback",
+    category: "Network Infrastructure",
+    description: "Local development server or internal container loopback interface (127.0.0.1).",
+  },
+  direct_traffic: {
+    title: "Direct Network Traffic",
+    category: "Network Infrastructure",
+    description: "Direct client connection without an identified datacenter proxy or VPN relay.",
+  },
   state_backbone_relay: {
     title: "State Backbone Relay",
     category: "Network Infrastructure",
