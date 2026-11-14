@@ -1,4 +1,5 @@
-import { createCipheriv, createDecipheriv } from "crypto";
+import { createCipheriv, createDecipheriv, randomBytes, privateDecrypt, createPublicKey } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { debugLog, debugDecision } from "../config/logger";
 
 export interface BotTelemetryPayload {
@@ -27,7 +28,7 @@ const SECRET_KEY = process.env.TELEMETRY_SECRET_KEY || "0123456789abcdef01234567
  */
 export function encryptTelemetry(payload: BotTelemetryPayload, secretKey = SECRET_KEY): string {
   const key = Buffer.from(secretKey.slice(0, 64), "hex");
-  const iv = Buffer.alloc(12, 0); // fixed or random IV for demo
+  const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   const jsonStr = JSON.stringify(payload);
   let encrypted = cipher.update(jsonStr, "utf8", "base64");
@@ -54,6 +55,19 @@ export function decryptTelemetry(token: string | object, secretKey = SECRET_KEY)
 
   const trimmed = token.trim();
 
+  // Hybrid browser envelope: RSA-OAEP-SHA256 wraps a random AES-256-GCM key.
+  if (trimmed.startsWith("v1.")) {
+    try {
+      const parts = trimmed.split(".");
+      if (parts.length !== 4) return {};
+      const key = privateDecrypt({ key: telemetryPrivateKey(), oaepHash: "sha256" }, Buffer.from(parts[1]!, "base64"));
+      const encrypted = Buffer.from(parts[3]!, "base64");
+      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(parts[2]!, "base64"));
+      decipher.setAuthTag(encrypted.subarray(-16));
+      return JSON.parse(Buffer.concat([decipher.update(encrypted.subarray(0, -16)), decipher.final()]).toString("utf8"));
+    } catch { return {}; }
+  }
+
   // Try direct JSON parse
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
     try {
@@ -67,14 +81,13 @@ export function decryptTelemetry(token: string | object, secretKey = SECRET_KEY)
   const parts = trimmed.split(":");
   if (parts.length === 3) {
     try {
-      const [ivB64, tagB64, dataB64] = parts;
+      const [ivB64, tagB64, dataB64] = parts as [string, string, string];
       const key = Buffer.from(secretKey.slice(0, 64), "hex");
       const iv = Buffer.from(ivB64, "base64");
       const authTag = Buffer.from(tagB64, "base64");
       const decipher = createDecipheriv("aes-256-gcm", key, iv);
       decipher.setAuthTag(authTag);
-      let decrypted = decipher.update(dataB64, "base64", "utf8");
-      decrypted += decipher.final("utf8");
+      const decrypted = Buffer.concat([decipher.update(Buffer.from(dataB64, "base64")), decipher.final()]).toString("utf8");
       return JSON.parse(decrypted);
     } catch {
       // Fall through to other formats
@@ -101,7 +114,8 @@ export function evaluateBotTelemetry(
   token: string | object,
   honeypotFieldVal?: string | null
 ): BotEvaluationResult {
-  const telemetry = decryptTelemetry(token);
+  const decoded = decryptTelemetry(token);
+  const telemetry = decoded && typeof decoded === "object" && !Array.isArray(decoded) ? decoded : {};
   const reasons: string[] = [];
   let score = 0;
 
@@ -149,7 +163,8 @@ export function evaluateBotTelemetry(
   if (mouseEvents === 0 && touchEvents === 0 && variance === 0 && keyCount === 0) {
     if (Object.keys(telemetry).length > 0) {
       reasons.push("No physical interaction events detected (zero mouse/touch/keystrokes)");
-      score += 75;
+      // Missing interaction can be caused by accessibility tools or password managers.
+      score += 20;
     }
   } else if (keyCount > 8 && variance < 2) {
     reasons.push("Synthetic robotic typing cadence (flight variance < 2ms)");
@@ -170,4 +185,12 @@ export function evaluateBotTelemetry(
     reasons,
     telemetry,
   };
+}
+
+function telemetryPrivateKey(): string {
+  return readFileSync(process.env.TELEMETRY_PRIVATE_KEY_PATH || "./keys/telemetry-private.pem", "utf8");
+}
+
+export function getTelemetryPublicKey(): string {
+  return createPublicKey(telemetryPrivateKey()).export({ type: "spki", format: "der" }).toString("base64");
 }

@@ -1,15 +1,24 @@
 {
-  "name": "truthier",
+  "name": "verius",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
   "scripts": {
     "start": "bun run src/index.ts",
-    "dev": "bun run --watch src/index.ts"
+    "dev": "bun run --watch src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "bun run scripts/migrate.ts",
+    "tenant:provision": "bun run scripts/provision-tenant.ts",
+    "wordpress:connect": "bun run scripts/connect-wordpress.ts",
+    "verify:e2e": "bun run scripts/verify-e2e.ts",
+    "verify:wordpress": "docker compose exec -T wordpress php < scripts/verify-wordpress.php",
+    "verify:browser": "node scripts/verify-collector-browser.mjs"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "drizzle-kit": "^0.31.11"
+    "drizzle-kit": "^0.31.11",
+    "playwright": "^1.65.1"
   },
   "peerDependencies": {
     "typescript": "^5"

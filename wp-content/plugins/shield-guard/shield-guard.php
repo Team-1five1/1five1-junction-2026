@@ -1,19 +1,19 @@
 <?php
 /**
- * Plugin Name: Truthier
+ * Plugin Name: Verius
  * Plugin URI:  https://github.com/Team-1five1/1five1-junction-2026
  * Description: Real-time Coordinated Propaganda, Disinformation & Headless Bot Defense using SemEval-50 Bitmask and Hostinger AI Router.
- * Version:     2.0.0
- * Author:      Truthier Team
+ * Version:     2.1.2
+ * Author:      Verius Team
  * License:     MIT
- * Text Domain: truthier
+ * Text Domain: verius
  */
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
-define('SHIELD_GUARD_VERSION', '2.0.0');
+define('SHIELD_GUARD_VERSION', '2.1.2');
 define('SHIELD_GUARD_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('SHIELD_GUARD_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -21,6 +21,7 @@ require_once SHIELD_GUARD_PLUGIN_DIR . 'includes/class-shield-interceptor.php';
 require_once SHIELD_GUARD_PLUGIN_DIR . 'includes/class-shield-webhook.php';
 require_once SHIELD_GUARD_PLUGIN_DIR . 'includes/class-shield-renderer.php';
 require_once SHIELD_GUARD_PLUGIN_DIR . 'includes/class-shield-admin.php';
+require_once SHIELD_GUARD_PLUGIN_DIR . 'includes/class-shield-visibility.php';
 
 function shield_guard_init() {
     Shield_Interceptor::get_instance();

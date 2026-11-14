@@ -1,0 +1,28 @@
+import { sql } from "../src/db";
+
+// Additive migration preserves existing comments and vault records.
+await sql.begin(async tx => {
+  await tx`CREATE TABLE IF NOT EXISTS tenants (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), api_key text NOT NULL UNIQUE, wp_webhook_url text NOT NULL, threshold_mode text NOT NULL DEFAULT 'balanced', created_at timestamp NOT NULL DEFAULT now())`;
+  await tx`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS webhook_secret text`;
+  await tx`CREATE TABLE IF NOT EXISTS submissions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), wp_comment_id integer NOT NULL, entity_id text NOT NULL, author_session_hash text NOT NULL, raw_text text NOT NULL, rating integer, author_type text NOT NULL, visibility text NOT NULL, routing_path text NOT NULL, model_used text NOT NULL, risk_score integer NOT NULL DEFAULT 0, shield_flags integer NOT NULL DEFAULT 0, failed_risk_ids jsonb NOT NULL DEFAULT '[]', triggered_shield_ids jsonb NOT NULL DEFAULT '[]', deep_research_explanation text, created_at timestamp NOT NULL DEFAULT now())`;
+  await tx`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS tenant_id text`;
+  await tx`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS research_evidence jsonb`;
+  await tx`CREATE UNIQUE INDEX IF NOT EXISTS submissions_tenant_comment_idx ON submissions (tenant_id, wp_comment_id)`;
+  await tx`CREATE INDEX IF NOT EXISTS submissions_velocity_idx ON submissions (tenant_id, entity_id, created_at)`;
+  await tx`CREATE TABLE IF NOT EXISTS honeypot_vault (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), submission_id uuid NOT NULL REFERENCES submissions(id), ip_address text NOT NULL, user_agent text NOT NULL, telemetry_json jsonb NOT NULL, pattern_cluster_id text, created_at timestamp NOT NULL DEFAULT now())`;
+  await tx`CREATE TABLE IF NOT EXISTS entity_banners (entity_id text PRIMARY KEY, anomaly_status text NOT NULL DEFAULT 'normal', banner_explanation text, updated_at timestamp NOT NULL DEFAULT now())`;
+  await tx`ALTER TABLE entity_banners ADD COLUMN IF NOT EXISTS tenant_id text NOT NULL DEFAULT 'legacy'`;
+  await tx`ALTER TABLE entity_banners ADD COLUMN IF NOT EXISTS sources jsonb NOT NULL DEFAULT '[]'`;
+  await tx`ALTER TABLE entity_banners DROP CONSTRAINT IF EXISTS entity_banners_pkey`;
+  await tx`ALTER TABLE entity_banners ADD PRIMARY KEY (tenant_id, entity_id)`;
+  await tx`CREATE TABLE IF NOT EXISTS evaluation_jobs (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id text NOT NULL, wp_comment_id integer NOT NULL, data jsonb NOT NULL, result jsonb, delivered_at timestamp, context_completed_at timestamp, created_at timestamp NOT NULL DEFAULT now())`;
+  await tx`ALTER TABLE evaluation_jobs ADD COLUMN IF NOT EXISTS context_completed_at timestamp`;
+  await tx`ALTER TABLE evaluation_jobs ADD COLUMN IF NOT EXISTS queue_name text NOT NULL DEFAULT 'shield-evaluation-v2'`;
+  await tx`ALTER TABLE evaluation_jobs ADD COLUMN IF NOT EXISTS failure_count integer NOT NULL DEFAULT 0`;
+  await tx`ALTER TABLE evaluation_jobs ADD COLUMN IF NOT EXISTS next_attempt_at timestamp`;
+  await tx`ALTER TABLE evaluation_jobs ADD COLUMN IF NOT EXISTS retry_paused_at timestamp`;
+  await tx`ALTER TABLE evaluation_jobs ADD COLUMN IF NOT EXISTS last_error jsonb`;
+  await tx`CREATE UNIQUE INDEX IF NOT EXISTS evaluation_jobs_tenant_comment_idx ON evaluation_jobs (tenant_id, wp_comment_id)`;
+});
+console.log("Database migration complete");
+await sql.end();

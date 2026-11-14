@@ -20,8 +20,8 @@ class Shield_Admin {
 
     public function add_admin_menu() {
         add_options_page(
-            'Truthier Settings',
-            'Truthier',
+            'Verius Settings',
+            'Verius',
             'manage_options',
             'shield-guard',
             array($this, 'render_settings_page')
@@ -43,10 +43,11 @@ class Shield_Admin {
             ? $input['threshold_mode']
             : 'balanced';
 
+        delete_transient('shield_telemetry_public_key');
         // Notify Bun API of mode change
         wp_remote_request($sanitized['api_url'] . '/v1/tenant/mode', array(
             'method'  => 'PATCH',
-            'headers' => array('Content-Type' => 'application/json'),
+            'headers' => array('Content-Type' => 'application/json', 'X-Shield-Key' => $sanitized['api_key']),
             'body'    => wp_json_encode(array(
                 'apiKey' => $sanitized['api_key'],
                 'mode'   => $sanitized['threshold_mode'],
@@ -74,7 +75,7 @@ class Shield_Admin {
 
         ?>
         <div class="wrap" style="max-width: 860px;">
-            <h1>🛡️ Truthier &mdash; Propaganda & Bot Defense</h1>
+            <h1>🛡️ Verius &mdash; Propaganda & Bot Defense</h1>
             <p>Integrated Coordinated Propaganda and Headless Bot Defense powered by SemEval-50 and Hostinger AI Router.</p>
 
             <div style="background: <?php echo $is_online ? '#ecfdf5' : '#fef2f2'; ?>; border: 1px solid <?php echo $is_online ? '#a7f3d0' : '#fecaca'; ?>; border-radius: 8px; padding: 14px 18px; margin: 16px 0; display: flex; align-items: center; justify-content: space-between;">
@@ -109,7 +110,7 @@ class Shield_Admin {
                         <th scope="row"><label for="shield_api_url">Bun Core API URL</label></th>
                         <td>
                             <input name="shield_guard_settings[api_url]" type="url" id="shield_api_url" value="<?php echo esc_attr(!empty($options['api_url']) ? $options['api_url'] : 'http://127.0.0.1:4000'); ?>" class="regular-text" />
-                            <p class="description">URL to the Truthier Bun service (e.g. <code>http://127.0.0.1:4000</code>).</p>
+                            <p class="description">URL to the Verius Bun service (e.g. <code>http://127.0.0.1:4000</code>).</p>
                         </td>
                     </tr>
                     <tr>
@@ -126,7 +127,7 @@ class Shield_Admin {
                         </td>
                     </tr>
                 </table>
-                <?php submit_button('Save Truthier Settings'); ?>
+                <?php submit_button('Save Verius Settings'); ?>
             </form>
         </div>
         <?php
