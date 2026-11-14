@@ -52,7 +52,8 @@ const server = serve({
       const git = getGitInfo();
       return Response.json({
         service: "bun-background-instance",
-        version: "1.0.0",
+        version: "1.0.1",
+        autoSyncVerified: true,
         bunVersion: Bun.version,
         git,
         startedAt: START_TIME.toISOString(),
@@ -250,7 +251,7 @@ const server = serve({
         <span class="bun-badge">🥟</span>
         <div>
           <h1>Bun Background Service</h1>
-          <p style="color: var(--text-muted); font-size: 13px;">Hostinger VPS Instance</p>
+          <p style="color: var(--text-muted); font-size: 13px;">Hostinger VPS Instance &bull; v1.0.1</p>
         </div>
       </div>
       <div class="status-badge">
