@@ -36,7 +36,6 @@ import {
   IconActivity,
   IconBot,
   IconSearch,
-  IconDatabase,
   IconSun,
   IconMoon,
   IconGlobe,
@@ -111,7 +110,7 @@ interface SubmissionItem {
 
 export function DashboardApp() {
   const [darkMode, setDarkMode] = useState(true);
-  const [activeTab, setActiveTab] = useState<"overview" | "map" | "bots" | "search" | "schema">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "map" | "bots" | "search">("overview");
   const [range, setRange] = useState<"24h" | "7d" | "30d">("7d");
   const [autoPoll, setAutoPoll] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<string>("--:--:--");
@@ -626,18 +625,6 @@ export function DashboardApp() {
                   <IconSearch className="h-3.5 w-3.5" />
                   Smart Search &amp; Tags (
                   {selectedTags.length + (searchQuery || similarToId ? 1 : 0)})
-                </TabsTrigger>
-              </HoverExplanation>
-
-              <HoverExplanation
-                title="PostgreSQL Database Tables"
-                category="Dashboard Tab"
-                rawKey="shield_db"
-                description="Reference view showing the exact database tables and columns saved in PostgreSQL right now."
-              >
-                <TabsTrigger value="schema">
-                  <IconDatabase className="h-3.5 w-3.5" />
-                  Saved DB Structure
                 </TabsTrigger>
               </HoverExplanation>
             </TabsList>
@@ -1539,136 +1526,6 @@ export function DashboardApp() {
                 />
               </CardContent>
             </Card>
-          </TabsContent>
-
-          {/* TAB 4: POSTGRES DB SCHEMA (Read-Only Reference) */}
-          <TabsContent value="schema">
-            <div className="grid gap-6 md:grid-cols-2">
-              <HoverExplanation
-                title="Submissions Table"
-                category="PostgreSQL Table"
-                rawKey="submissions"
-                description="Stores every comment, review rating, SemEval risk score, AI explanation, and 64-dimensional vector embedding."
-                className="block h-full"
-              >
-                <Card className="h-full">
-                  <CardHeader>
-                    <div className="flex items-center justify-between">
-                      <CardTitle>1. Comments &amp; Reviews (submissions)</CardTitle>
-                      <Badge variant="success">{kpis.totalSubmissions} rows</Badge>
-                    </div>
-                    <CardDescription>
-                      Stores every WordPress comment or product review, risk scores, AI forensic
-                      explanations, and semantic vector embeddings.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="font-mono text-xs space-y-1.5 text-muted-foreground">
-                    <div><strong className="text-foreground">id</strong> uuid PRIMARY KEY</div>
-                    <div><strong className="text-foreground">wp_comment_id</strong> integer NOT NULL</div>
-                    <div><strong className="text-foreground">entity_id</strong> text NOT NULL</div>
-                    <div><strong className="text-foreground">author_session_hash</strong> text NOT NULL</div>
-                    <div><strong className="text-foreground">raw_text</strong> text NOT NULL</div>
-                    <div><strong className="text-foreground">rating</strong> integer (1–5 or null)</div>
-                    <div><strong className="text-foreground">author_type</strong> text ('human' | 'bot')</div>
-                    <div><strong className="text-foreground">visibility</strong> text ('public' | 'public_flagged' | 'shadowbanned')</div>
-                    <div><strong className="text-foreground">routing_path</strong> text (BOT_HONEYPOT, ROUTE_1..ROUTE_4)</div>
-                    <div><strong className="text-foreground">model_used</strong> text ('none' | 'jev' | 'gemini-4-hydrogen')</div>
-                    <div><strong className="text-foreground">risk_score</strong> integer, <strong className="text-foreground">shield_flags</strong> integer</div>
-                    <div><strong className="text-foreground">failed_risk_ids</strong> jsonb (string[])</div>
-                    <div><strong className="text-foreground">triggered_shield_ids</strong> jsonb (string[])</div>
-                    <div><strong className="text-foreground">deep_research_explanation</strong> text</div>
-                    <div><strong className="text-foreground">origin_country_code</strong> text, <strong className="text-foreground">origin_country</strong> text</div>
-                    <div><strong className="text-foreground">origin_region</strong> text, <strong className="text-foreground">origin_city</strong> text</div>
-                    <div><strong className="text-foreground">origin_lat / origin_lng</strong> double precision, <strong className="text-foreground">origin_network</strong> text</div>
-                    <div><strong className="text-sky-600 dark:text-sky-300">embedding</strong> vector(64) (pgvector cosine index)</div>
-                    <div><strong className="text-foreground">created_at</strong> timestamp</div>
-                  </CardContent>
-                </Card>
-              </HoverExplanation>
-
-              <HoverExplanation
-                title="Bot Honeypot Vault Table"
-                category="PostgreSQL Table"
-                rawKey="honeypot_vault"
-                description="Stores technical browser signals (mouse movements, keystrokes, IP, User-Agent) for every automated bot blocked on your site."
-                className="block h-full"
-              >
-                <Card className="h-full">
-                  <CardHeader>
-                    <div className="flex items-center justify-between">
-                      <CardTitle>2. Blocked Bot Telemetry (honeypot_vault)</CardTitle>
-                      <Badge variant="secondary">{botVault?.totalBots ?? kpis.botsDetected} rows</Badge>
-                    </div>
-                    <CardDescription>
-                      Forensic telemetry vault for intercepted headless bots and hidden trap
-                      submissions.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="font-mono text-xs space-y-1.5 text-muted-foreground">
-                    <div><strong className="text-foreground">id</strong> uuid PRIMARY KEY</div>
-                    <div><strong className="text-foreground">submission_id</strong> uuid REFERENCES submissions(id)</div>
-                    <div><strong className="text-foreground">ip_address</strong> text NOT NULL</div>
-                    <div><strong className="text-foreground">user_agent</strong> text NOT NULL</div>
-                    <div><strong className="text-foreground">telemetry_json</strong> jsonb (mouseMoves, keyPresses, timeToSubmitMs, webdriver, confidenceScore, reasons[])</div>
-                    <div><strong className="text-foreground">pattern_cluster_id</strong> text</div>
-                    <div><strong className="text-foreground">created_at</strong> timestamp</div>
-                  </CardContent>
-                </Card>
-              </HoverExplanation>
-
-              <HoverExplanation
-                title="Page Alert Banners Table"
-                category="PostgreSQL Table"
-                rawKey="entity_banners"
-                description="Tracks whether a product or blog post is experiencing normal traffic, genuine customer backlash, or a coordinated attack."
-                className="block h-full"
-              >
-                <Card className="h-full">
-                  <CardHeader>
-                    <div className="flex items-center justify-between">
-                      <CardTitle>3. Page Alert Notices (entity_banners)</CardTitle>
-                      <Badge variant="info">{overview?.entityBanners?.length || 0} rows</Badge>
-                    </div>
-                    <CardDescription>
-                      Per-product or post review spike notices shown to visitors.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="font-mono text-xs space-y-1.5 text-muted-foreground">
-                    <div><strong className="text-foreground">entity_id</strong> text PRIMARY KEY</div>
-                    <div><strong className="text-foreground">anomaly_status</strong> text ('normal' | 'legitimate_backlash' | 'coordinated_attack')</div>
-                    <div><strong className="text-foreground">banner_explanation</strong> text</div>
-                    <div><strong className="text-foreground">updated_at</strong> timestamp</div>
-                  </CardContent>
-                </Card>
-              </HoverExplanation>
-
-              <HoverExplanation
-                title="Website Tenant Settings Table"
-                category="PostgreSQL Table"
-                rawKey="tenants"
-                description="Stores your WordPress webhook URL, API key, and active sensitivity mode."
-                className="block h-full"
-              >
-                <Card className="h-full">
-                  <CardHeader>
-                    <div className="flex items-center justify-between">
-                      <CardTitle>4. Site Settings (tenants)</CardTitle>
-                      <Badge variant="secondary">Mode: {humanizeKey(sys.thresholdMode)}</Badge>
-                    </div>
-                    <CardDescription>
-                      WordPress webhook endpoints, HMAC verification keys, and sensitivity modes.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="font-mono text-xs space-y-1.5 text-muted-foreground">
-                    <div><strong className="text-foreground">id</strong> uuid PRIMARY KEY</div>
-                    <div><strong className="text-foreground">api_key</strong> text UNIQUE NOT NULL</div>
-                    <div><strong className="text-foreground">wp_webhook_url</strong> text NOT NULL</div>
-                    <div><strong className="text-foreground">threshold_mode</strong> text ('strict' | 'balanced' | 'high_precision')</div>
-                    <div><strong className="text-foreground">created_at</strong> timestamp</div>
-                  </CardContent>
-                </Card>
-              </HoverExplanation>
-            </div>
           </TabsContent>
         </Tabs>
       </main>
