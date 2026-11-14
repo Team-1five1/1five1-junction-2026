@@ -20,6 +20,11 @@ import {
 } from "../workers/evaluation-worker";
 import { getHoneypotVaultStats } from "../engines/honeypot-cluster";
 import { cleanTrafficLogs } from "../engines/traffic-cleaner";
+import {
+  detectCoordinatedSwarms,
+  parseSocialDataset,
+} from "../engines/coordination-detector";
+import { appendTenantTrafficLogLine } from "./dashboard-api";
 import { ProviderHttpError } from "../ai/provider-errors";
 
 export const apiRouter = new Hono<{ Variables: { tenant: typeof tenants.$inferSelect } }>();
@@ -30,6 +35,11 @@ const ingestSchema = z.object({
   rawText: z.string().trim().min(1).max(50000), rating: z.number().int().min(1).max(5).nullable().optional(),
   telemetryToken: z.union([z.string().max(20000), z.record(z.string(), z.unknown())]).optional(),
   honeypotValue: z.string().max(1000).nullable().optional(),
+  authorHandle: z.string().max(200).nullable().optional(),
+  accountCreatedAt: z.string().max(100).nullable().optional(),
+  replyToCommentId: z.union([z.string().max(200), z.number().int()]).nullable().optional(),
+  sharedUrl: z.string().max(2000).nullable().optional(),
+  deviceFingerprint: z.string().max(500).nullable().optional(),
 });
 
 apiRouter.use("/v1/*", bodyLimit({ maxSize: 128 * 1024 }));
@@ -90,8 +100,14 @@ apiRouter.post("/v1/ingest", async c => {
   if (!parsed.success) return c.json({ error: "Invalid payload", details: parsed.error.issues }, 400);
   const tenant = c.get("tenant"), input = parsed.data;
   if (!tenant.webhookSecret) return c.json({ error: "Tenant callback is not configured" }, 503);
+  const rawReplyId = input.replyToCommentId;
+  const normalizedReplyToCommentId =
+    rawReplyId !== undefined && rawReplyId !== null && rawReplyId !== "" && Number.isFinite(Number(rawReplyId))
+      ? Math.trunc(Number(rawReplyId))
+      : null;
   const data = {
     ...input,
+    replyToCommentId: normalizedReplyToCommentId,
     tenantId: tenant.id,
     thresholdMode: modeSchema.parse(tenant.thresholdMode),
     botResult: evaluateBotTelemetry(input.telemetryToken ?? "", input.honeypotValue),
@@ -134,8 +150,88 @@ apiRouter.post("/v1/traffic/clean", async (c) => {
   if (!logs || typeof logs !== "string" || logs.trim().length === 0) {
     return c.json({ error: "Access logs content required in 'logs' parameter or request body" }, 400);
   }
-  const report = cleanTrafficLogs(logs);
+  const report = cleanTrafficLogs(logs, body?.options);
   return c.json(report);
+});
+
+const trafficEventSchema = z.object({
+  ipAddress: z.string().max(100).optional(),
+  method: z.string().max(16).optional(),
+  path: z.string().max(2000).optional(),
+  statusCode: z.number().int().min(100).max(599).optional(),
+  userAgent: z.string().max(1000).optional(),
+  username: z.string().max(200).optional(),
+});
+
+function formatCombinedLogTimestamp(date: Date): string {
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(date.getUTCDate())}/${months[date.getUTCMonth()]}/${date.getUTCFullYear()}:${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} +0000`;
+}
+
+apiRouter.post("/v1/traffic/event", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const parsed = trafficEventSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "Invalid traffic event payload", details: parsed.error.issues }, 400);
+  }
+  const input = parsed.data;
+  const tenant = c.get("tenant");
+  const cleanField = (val: string) => val.replace(/[\r\n"]/g, " ").trim();
+
+  const ip = cleanField(
+    input.ipAddress ||
+      c.req.header("X-Shield-Visitor-IP") ||
+      c.req.header("cf-connecting-ip") ||
+      c.req.header("x-forwarded-for") ||
+      "127.0.0.1"
+  );
+  const method = cleanField(input.method || "GET").toUpperCase() || "GET";
+  let path = cleanField(input.path || "/") || "/";
+  if (input.username && input.username.trim().length > 0 && !/[?&](?:user|username|log|email)=/i.test(path)) {
+    const sep = path.includes("?") ? "&" : "?";
+    path = `${path}${sep}user=${encodeURIComponent(input.username.trim())}`;
+  }
+  const statusCode = input.statusCode ?? 200;
+  const ua = cleanField(input.userAgent || c.req.header("user-agent") || "-") || "-";
+  const line = `${ip} - - [${formatCombinedLogTimestamp(new Date())}] "${method} ${path} HTTP/1.1" ${statusCode} 512 "-" "${ua}"`;
+
+  await appendTenantTrafficLogLine(tenant?.id || "default", line);
+  return c.json({ status: "recorded", tenantId: tenant?.id || "default", line }, 201);
+});
+
+apiRouter.post("/v1/swarms/detect", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const rawDataset =
+    typeof body?.csv === "string"
+      ? body.csv
+      : typeof body?.dataset === "string"
+        ? body.dataset
+        : null;
+  const submissionsInput = Array.isArray(body?.submissions)
+    ? body.submissions
+    : rawDataset !== null
+      ? parseSocialDataset(rawDataset)
+      : null;
+
+  if (!submissionsInput) {
+    return c.json(
+      { error: "Request body must contain a 'submissions' array or a 'csv'/'dataset' string" },
+      400
+    );
+  }
+  const trafficReport =
+    typeof body.logs === "string" && body.logs.trim().length > 0
+      ? cleanTrafficLogs(body.logs, body.trafficOptions)
+      : undefined;
+  const knownMaliciousIps = Array.isArray(body.knownMaliciousIps)
+    ? body.knownMaliciousIps.filter((ip: unknown) => typeof ip === "string")
+    : undefined;
+  const result = detectCoordinatedSwarms(submissionsInput, {
+    trafficReport,
+    knownMaliciousIps,
+  });
+  return c.json(result);
 });
 
 apiRouter.patch("/v1/tenant/mode", async c => {

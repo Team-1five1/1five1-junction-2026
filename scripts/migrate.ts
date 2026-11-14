@@ -14,6 +14,15 @@ await sql.begin(async tx => {
   await tx`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_lat double precision`;
   await tx`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_lng double precision`;
   await tx`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_network text`;
+  await tx`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS ip_address text`;
+  await tx`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS user_agent text`;
+  await tx`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS author_handle text`;
+  await tx`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS account_created_at timestamp`;
+  await tx`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS reply_to_comment_id integer`;
+  await tx`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS shared_url text`;
+  await tx`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS device_fingerprint text`;
+  await tx`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS telemetry_summary jsonb`;
+  await tx`CREATE TABLE IF NOT EXISTS traffic_logs (tenant_id text PRIMARY KEY, raw_logs text NOT NULL, updated_at timestamp NOT NULL DEFAULT now())`;
   await tx`CREATE UNIQUE INDEX IF NOT EXISTS submissions_tenant_comment_idx ON submissions (tenant_id, wp_comment_id)`;
   await tx`CREATE INDEX IF NOT EXISTS submissions_velocity_idx ON submissions (tenant_id, entity_id, created_at)`;
   await tx`CREATE TABLE IF NOT EXISTS honeypot_vault (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), submission_id uuid NOT NULL REFERENCES submissions(id), ip_address text NOT NULL, user_agent text NOT NULL, telemetry_json jsonb NOT NULL, pattern_cluster_id text, created_at timestamp NOT NULL DEFAULT now())`;

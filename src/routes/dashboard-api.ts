@@ -20,7 +20,12 @@ import {
   activeThresholdMode,
   type InMemorySubmissionRecord,
 } from "../workers/evaluation-worker";
-import { detectCoordinatedSwarms } from "../engines/coordination-detector";
+import {
+  detectCoordinatedSwarms,
+  parseSocialDataset,
+  generateSampleSocialDatasetCsv,
+  type RawSubmissionInput,
+} from "../engines/coordination-detector";
 import {
   cleanTrafficLogs,
   generateRealisticTrafficLogs,
@@ -29,7 +34,86 @@ import {
 
 export const dashboardApiRouter = new Hono();
 
-let currentTrafficLogs = generateRealisticTrafficLogs();
+const tenantTrafficLogs = new Map<string, string>([
+  ["default", generateRealisticTrafficLogs()],
+]);
+const TRAFFIC_LOG_MAX_CHARS = 2_000_000;
+let importedSocialSubmissions: RawSubmissionInput[] = [];
+
+export async function getTenantTrafficLogs(tenantId = "default"): Promise<string> {
+  const tid = tenantId || "default";
+  const mem = tenantTrafficLogs.get(tid);
+  if (mem !== undefined) return mem;
+
+  await ensureDashboardSchema();
+  if (dbReachable) {
+    try {
+      const rows = await sql`
+        SELECT raw_logs FROM traffic_logs
+        WHERE tenant_id = ${tid}
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `;
+      if (rows[0]?.raw_logs && typeof rows[0].raw_logs === "string") {
+        tenantTrafficLogs.set(tid, rows[0].raw_logs);
+        return rows[0].raw_logs;
+      }
+    } catch {
+      // fall through
+    }
+  }
+  return tid === "default" ? generateRealisticTrafficLogs() : "";
+}
+
+export async function saveTenantTrafficLogs(
+  tenantId = "default",
+  rawLogs: string,
+  source = "manual"
+): Promise<string> {
+  const tid = tenantId || "default";
+  const bounded =
+    rawLogs.length > TRAFFIC_LOG_MAX_CHARS
+      ? rawLogs.slice(rawLogs.length - TRAFFIC_LOG_MAX_CHARS)
+      : rawLogs;
+  tenantTrafficLogs.set(tid, bounded);
+
+  await ensureDashboardSchema();
+  if (dbReachable) {
+    try {
+      const existing = await sql`
+        SELECT id FROM traffic_logs
+        WHERE tenant_id = ${tid}
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `;
+      if (existing[0]?.id) {
+        await sql`
+          UPDATE traffic_logs
+          SET raw_logs = ${bounded}, source = ${source}, updated_at = now()
+          WHERE id = ${existing[0].id}
+        `;
+      } else {
+        await sql`
+          INSERT INTO traffic_logs (tenant_id, raw_logs, source)
+          VALUES (${tid}, ${bounded}, ${source})
+        `;
+      }
+    } catch (err: any) {
+      console.warn(`traffic_logs save warning: ${err.message}`);
+    }
+  }
+  return bounded;
+}
+
+export async function appendTenantTrafficLogLine(
+  tenantId = "default",
+  line: string
+): Promise<void> {
+  const tid = tenantId || "default";
+  const prev = await getTenantTrafficLogs(tid);
+  const next = prev && prev.trim().length > 0 ? `${prev}\n${line}` : line;
+  await saveTenantTrafficLogs(tid, next, "live_event");
+}
 
 let schemaChecked = false;
 let pgvectorAvailable = false;
@@ -58,6 +142,13 @@ interface UnifiedSubmission {
   createdAt: string;
   embedding: number[];
   origin: OriginGeoInfo;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+  authorHandle?: string | null;
+  accountCreatedAt?: string | null;
+  replyToCommentId?: number | null;
+  sharedUrl?: string | null;
+  deviceFingerprint?: string | null;
   similarityScore?: number | null;
   honeypot: {
     ipAddress: string;
@@ -92,6 +183,10 @@ const DEMO_SEED_ITEMS = [
     wpCommentId: 901,
     entityId: "product_quantum_router",
     authorSessionHash: "bot_88f1a90c",
+    authorHandle: "crypto_king_2026",
+    sharedUrl: "http://claim-airdrop-fast.xyz",
+    deviceFingerprint: "fp_bot_cluster_a1",
+    accountCreatedHoursAgo: 4,
     rawText: "🔥 Best Crypto Airdrop 2026! Claim 5,000 USDT instant reward at http://claim-airdrop-fast.xyz before timer expires!!",
     rating: 5,
     authorType: "bot" as const,
@@ -117,6 +212,10 @@ const DEMO_SEED_ITEMS = [
     wpCommentId: 902,
     entityId: "product_quantum_router",
     authorSessionHash: "bot_88f1a91d",
+    authorHandle: "crypto_king_2027",
+    sharedUrl: "http://claim-airdrop-fast.xyz",
+    deviceFingerprint: "fp_bot_cluster_a1",
+    accountCreatedHoursAgo: 4,
     rawText: "🚀 Claim 5,000 USDT free token distribution now at http://claim-airdrop-fast.xyz ! Instant wallet payout guaranteed 100%!",
     rating: 5,
     authorType: "bot" as const,
@@ -128,7 +227,7 @@ const DEMO_SEED_ITEMS = [
     failedRiskIds: ["Q4", "Q7", "Q41", "Q44"],
     triggeredShieldIds: [],
     deepResearchExplanation: null,
-    hoursAgo: 3.2,
+    hoursAgo: 1.52,
     honeypot: {
       ipAddress: "185.220.101.49",
       userAgent: "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/122.0.0.0",
@@ -178,7 +277,7 @@ const DEMO_SEED_ITEMS = [
     failedRiskIds: ["Q4", "Q17", "Q20", "Q41", "Q44"],
     triggeredShieldIds: [],
     deepResearchExplanation: null,
-    hoursAgo: 18.0,
+    hoursAgo: 6.55,
     honeypot: {
       ipAddress: "91.132.147.92",
       userAgent: "Playwright/1.42.0 (Chromium 123.0)",
@@ -284,6 +383,8 @@ const DEMO_SEED_ITEMS = [
     wpCommentId: 909,
     entityId: "product_quantum_router",
     authorSessionHash: "hum_19b7e211",
+    authorHandle: "alex_m_dev",
+    ipAddress: "86.142.81.14",
     rawText: "I'm so annoyed! My order #48219 was delayed by 4 days and after installing firmware v4.2 the Wi-Fi drops every 20 minutes. Terrible update, please fix this bug or issue a refund!",
     rating: 1,
     authorType: "human" as const,
@@ -302,6 +403,9 @@ const DEMO_SEED_ITEMS = [
     wpCommentId: 910,
     entityId: "product_quantum_router",
     authorSessionHash: "hum_55d9a834",
+    authorHandle: "sarah_netops",
+    ipAddress: "86.142.81.22",
+    replyToCommentId: 909,
     rawText: "Patch v4.2 broke VLAN tagging on port 4 and caused a crash under heavy load. Really frustrated with customer service delay, hoping hotfix v4.2.1 resolves it soon.",
     rating: 2,
     authorType: "human" as const,
@@ -461,6 +565,10 @@ const DEMO_SEED_ITEMS = [
     wpCommentId: 918,
     entityId: "post_firmware_v4_2",
     authorSessionHash: "bot_61b8d209",
+    authorHandle: "truth_patriot_99",
+    replyToCommentId: 907,
+    deviceFingerprint: "fp_brigade_09",
+    accountCreatedHoursAgo: 6,
     rawText: "THE CORRUPT ELITES ARE HIDING THE TRUTH ABOUT FIRMWARE v4.2!! Repost this everywhere before deletion!!",
     rating: 1,
     authorType: "bot" as const,
@@ -558,8 +666,27 @@ export async function ensureDashboardSchema(): Promise<{
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_lat double precision`;
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_lng double precision`;
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_network text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS ip_address text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS user_agent text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS author_handle text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS account_created_at timestamp`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS reply_to_comment_id text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS shared_url text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS device_fingerprint text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS telemetry_summary jsonb`;
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS submissions_tenant_comment_idx ON submissions (tenant_id, wp_comment_id)`;
     await sql`CREATE INDEX IF NOT EXISTS submissions_velocity_idx ON submissions (tenant_id, entity_id, created_at)`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS traffic_logs (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id text NOT NULL,
+        raw_logs text NOT NULL,
+        source text NOT NULL DEFAULT 'manual',
+        created_at timestamp NOT NULL DEFAULT now(),
+        updated_at timestamp NOT NULL DEFAULT now()
+      );
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS traffic_logs_tenant_idx ON traffic_logs (tenant_id, updated_at)`;
     await sql`
       CREATE TABLE IF NOT EXISTS honeypot_vault (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -673,11 +800,16 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
         ]);
         const vecLit = toPgVectorLiteral(emb);
         const origin = resolveOriginGeo({
-          ipAddress: item.honeypot?.ipAddress || null,
+          ipAddress: (item as any).ipAddress || item.honeypot?.ipAddress || null,
           authorSessionHash: taggedHash,
           wpCommentId: item.wpCommentId,
           authorType: item.authorType,
         });
+        const accountCreatedAt = (item as any).accountCreatedHoursAgo
+          ? new Date(Date.now() - (item as any).accountCreatedHoursAgo * 3600 * 1000)
+          : null;
+        const resolvedIp = (item as any).ipAddress || item.honeypot?.ipAddress || origin.ipAddress;
+        const resolvedUa = (item as any).userAgent || item.honeypot?.userAgent || null;
 
         const [sub] = await db
           .insert(submissions)
@@ -696,6 +828,13 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
             failedRiskIds: item.failedRiskIds,
             triggeredShieldIds: item.triggeredShieldIds,
             deepResearchExplanation: item.deepResearchExplanation,
+            ipAddress: resolvedIp,
+            userAgent: resolvedUa,
+            authorHandle: (item as any).authorHandle ?? null,
+            accountCreatedAt,
+            replyToCommentId: (item as any).replyToCommentId ?? null,
+            sharedUrl: (item as any).sharedUrl ?? null,
+            deviceFingerprint: (item as any).deviceFingerprint ?? null,
             originCountryCode: origin.countryCode,
             originCountry: origin.countryName,
             originRegion: origin.region,
@@ -795,11 +934,14 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
       ...item.triggeredShieldIds,
     ]);
     const origin = resolveOriginGeo({
-      ipAddress: item.honeypot?.ipAddress || null,
+      ipAddress: (item as any).ipAddress || item.honeypot?.ipAddress || null,
       authorSessionHash: taggedHash,
       wpCommentId: item.wpCommentId,
       authorType: item.authorType,
     });
+    const accountCreatedAt = (item as any).accountCreatedHoursAgo
+      ? new Date(Date.now() - (item as any).accountCreatedHoursAgo * 3600 * 1000)
+      : null;
 
     const record: InMemorySubmissionRecord = {
       id,
@@ -817,6 +959,13 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
       failedRiskIds: item.failedRiskIds,
       triggeredShieldIds: item.triggeredShieldIds,
       deepResearchExplanation: item.deepResearchExplanation,
+      ipAddress: (item as any).ipAddress || item.honeypot?.ipAddress || origin.ipAddress,
+      userAgent: (item as any).userAgent || item.honeypot?.userAgent || null,
+      authorHandle: (item as any).authorHandle ?? null,
+      accountCreatedAt,
+      replyToCommentId: (item as any).replyToCommentId ?? null,
+      sharedUrl: (item as any).sharedUrl ?? null,
+      deviceFingerprint: (item as any).deviceFingerprint ?? null,
       origin,
       createdAt,
       embedding,
@@ -964,6 +1113,13 @@ async function loadAllUnifiedSubmissions(): Promise<{
           s.failed_risk_ids,
           s.triggered_shield_ids,
           s.deep_research_explanation,
+          s.ip_address AS sub_ip_address,
+          s.user_agent AS sub_user_agent,
+          s.author_handle,
+          s.account_created_at,
+          s.reply_to_comment_id,
+          s.shared_url,
+          s.device_fingerprint,
           s.origin_country_code,
           s.origin_country,
           s.origin_region,
@@ -987,8 +1143,9 @@ async function loadAllUnifiedSubmissions(): Promise<{
         const triggeredShieldIds = Array.isArray(r.triggered_shield_ids) ? r.triggered_shield_ids : [];
         const { riskTagDetails, shieldTagDetails } = enrichQuestionTags(failedRiskIds, triggeredShieldIds);
         const telemetry = r.telemetry_json && typeof r.telemetry_json === "object" ? r.telemetry_json : null;
+        const effectiveIp = r.sub_ip_address || r.ip_address || null;
         const resolvedOrigin = resolveOriginGeo({
-          ipAddress: r.ip_address || null,
+          ipAddress: effectiveIp,
           authorSessionHash: r.author_session_hash,
           wpCommentId: Number(r.wp_comment_id),
           authorType: r.author_type as "human" | "bot",
@@ -1011,7 +1168,7 @@ async function loadAllUnifiedSubmissions(): Promise<{
                 r.origin_lng !== null && r.origin_lng !== undefined
                   ? Number(r.origin_lng)
                   : resolvedOrigin.lng,
-              ipAddress: r.ip_address || resolvedOrigin.ipAddress,
+              ipAddress: effectiveIp || resolvedOrigin.ipAddress,
               networkType: r.origin_network || resolvedOrigin.networkType,
               asnLabel: resolvedOrigin.asnLabel,
             }
@@ -1036,11 +1193,23 @@ async function loadAllUnifiedSubmissions(): Promise<{
           createdAt: new Date(r.created_at).toISOString(),
           embedding: computeLocalEmbedding(r.raw_text || "", [...failedRiskIds, ...triggeredShieldIds]),
           origin,
+          ipAddress: effectiveIp,
+          userAgent: r.sub_user_agent || r.user_agent || null,
+          authorHandle: r.author_handle || null,
+          accountCreatedAt: r.account_created_at ? new Date(r.account_created_at).toISOString() : null,
+          replyToCommentId:
+            r.reply_to_comment_id !== null &&
+            r.reply_to_comment_id !== undefined &&
+            Number.isFinite(Number(r.reply_to_comment_id))
+              ? Math.trunc(Number(r.reply_to_comment_id))
+              : null,
+          sharedUrl: r.shared_url || null,
+          deviceFingerprint: r.device_fingerprint || null,
           honeypot:
             r.author_type === "bot" || r.ip_address
               ? {
-                  ipAddress: r.ip_address || "unknown",
-                  userAgent: r.user_agent || "unknown",
+                  ipAddress: r.ip_address || effectiveIp || "unknown",
+                  userAgent: r.user_agent || r.sub_user_agent || "unknown",
                   confidenceScore: Number(telemetry?.confidenceScore ?? 95),
                   reasons: Array.isArray(telemetry?.reasons) ? telemetry.reasons : ["bot_telemetry_flagged"],
                   patternClusterId: r.pattern_cluster_id || "cluster_headless_generic",
@@ -1071,7 +1240,7 @@ async function loadAllUnifiedSubmissions(): Promise<{
     const origin =
       s.origin ||
       resolveOriginGeo({
-        ipAddress: hp?.ipAddress || null,
+        ipAddress: s.ipAddress || hp?.ipAddress || null,
         authorSessionHash: s.authorSessionHash,
         wpCommentId: s.wpCommentId,
         authorType: s.authorType,
@@ -1095,6 +1264,16 @@ async function loadAllUnifiedSubmissions(): Promise<{
       createdAt: s.createdAt.toISOString(),
       embedding: s.embedding,
       origin,
+      ipAddress: s.ipAddress || hp?.ipAddress || origin.ipAddress || null,
+      userAgent: s.userAgent || hp?.userAgent || null,
+      authorHandle: s.authorHandle || null,
+      accountCreatedAt:
+        s.accountCreatedAt instanceof Date
+          ? s.accountCreatedAt.toISOString()
+          : s.accountCreatedAt || null,
+      replyToCommentId: s.replyToCommentId || null,
+      sharedUrl: s.sharedUrl || null,
+      deviceFingerprint: s.deviceFingerprint || null,
       honeypot: hp
         ? {
             ipAddress: hp.ipAddress,
@@ -1720,9 +1899,8 @@ dashboardApiRouter.delete("/api/dashboard/seed", async (c) => {
  * Detects and returns coordinated bot swarms, brigading networks, and astroturfing campaigns
  * across posting timing, account similarities, subnet/ASNs, and paraphrased text reuse.
  */
-dashboardApiRouter.get("/api/dashboard/swarms", async (c) => {
-  const { items } = await loadAllUnifiedSubmissions();
-  const inputSubmissions = items.map((s) => ({
+function mapUnifiedToSwarmInput(s: UnifiedSubmission): RawSubmissionInput {
+  return {
     id: s.id,
     wpCommentId: s.wpCommentId,
     entityId: s.entityId,
@@ -1732,15 +1910,91 @@ dashboardApiRouter.get("/api/dashboard/swarms", async (c) => {
     authorType: s.authorType,
     visibility: s.visibility,
     createdAt: s.createdAt,
-    ipAddress: s.honeypot?.ipAddress || "127.0.0.1",
-    userAgent: s.honeypot?.userAgent || "unknown",
+    ipAddress: s.ipAddress || s.honeypot?.ipAddress || s.origin?.ipAddress || "127.0.0.1",
+    userAgent: s.userAgent || s.honeypot?.userAgent || "unknown",
+    ...(s.authorHandle ? { authorHandle: s.authorHandle } : {}),
+    ...(s.accountCreatedAt ? { accountCreatedAt: s.accountCreatedAt } : {}),
+    ...(s.replyToCommentId ? { replyToCommentId: s.replyToCommentId } : {}),
+    ...(s.sharedUrl ? { sharedUrl: s.sharedUrl } : {}),
+    ...(s.deviceFingerprint ? { deviceFingerprint: s.deviceFingerprint } : {}),
     telemetry: s.honeypot?.telemetry || {},
     embedding: s.embedding,
     origin: s.origin,
-  }));
+  };
+}
 
-  const result = detectCoordinatedSwarms(inputSubmissions);
-  return c.json(result);
+dashboardApiRouter.get("/api/dashboard/swarms", async (c) => {
+  const tenantId = c.req.query("tenantId") || "default";
+  const onlyImported = c.req.query("onlyImported") === "true";
+  const { items } = await loadAllUnifiedSubmissions();
+  const inputSubmissions: RawSubmissionInput[] = onlyImported
+    ? [...importedSocialSubmissions]
+    : [...importedSocialSubmissions, ...items.map(mapUnifiedToSwarmInput)];
+
+  const rawLogs = await getTenantTrafficLogs(tenantId);
+  const trafficReport = cleanTrafficLogs(rawLogs);
+  const result = detectCoordinatedSwarms(inputSubmissions, { trafficReport });
+  return c.json({
+    ...result,
+    importedSocialCount: importedSocialSubmissions.length,
+  });
+});
+
+/**
+ * POST /api/dashboard/swarms/import
+ * Parses & imports generic social platform CSV or JSON datasets into swarm analysis.
+ */
+dashboardApiRouter.post("/api/dashboard/swarms/import", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const loadSample = body?.loadSample === true;
+  const rawDataset = loadSample
+    ? generateSampleSocialDatasetCsv()
+    : typeof body?.dataset === "string"
+      ? body.dataset
+      : typeof body?.csv === "string"
+        ? body.csv
+        : null;
+
+  if (!rawDataset) {
+    return c.json(
+      { error: "Provide a 'dataset' (CSV or JSON) string or set loadSample: true" },
+      400
+    );
+  }
+
+  const parsed = parseSocialDataset(rawDataset);
+  if (parsed.length === 0) {
+    return c.json({ error: "No valid social posts found in provided dataset" }, 400);
+  }
+
+  const mode = body?.mode === "append" ? "append" : "replace";
+  if (mode === "append") {
+    importedSocialSubmissions = [...importedSocialSubmissions, ...parsed];
+  } else {
+    importedSocialSubmissions = parsed;
+  }
+
+  const tenantId = body?.tenantId || c.req.query("tenantId") || "default";
+  const rawLogs = await getTenantTrafficLogs(tenantId);
+  const trafficReport = cleanTrafficLogs(rawLogs);
+
+  const combinedInput: RawSubmissionInput[] =
+    body?.onlyImported === true
+      ? [...importedSocialSubmissions]
+      : [
+          ...importedSocialSubmissions,
+          ...(await loadAllUnifiedSubmissions()).items.map(mapUnifiedToSwarmInput),
+        ];
+
+  const report = detectCoordinatedSwarms(combinedInput, { trafficReport });
+  return c.json({
+    status: "imported",
+    importedCount: parsed.length,
+    totalImported: importedSocialSubmissions.length,
+    importedSocialCount: importedSocialSubmissions.length,
+    ...(loadSample ? { sampleDatasetCsv: rawDataset } : {}),
+    ...report,
+  });
 });
 
 /**
@@ -1748,8 +2002,14 @@ dashboardApiRouter.get("/api/dashboard/swarms", async (c) => {
  * Analyzes web-server access logs and returns clean vs malicious traffic breakdown,
  * top suspicious IPs, credential stuffers, and WAF defense rules.
  */
-dashboardApiRouter.get("/api/dashboard/traffic/overview", (c) => {
-  const report = cleanTrafficLogs(currentTrafficLogs);
+dashboardApiRouter.get("/api/dashboard/traffic/overview", async (c) => {
+  const tenantId = c.req.query("tenantId") || "default";
+  const aiPolicy = c.req.query("aiCrawlerPolicy") as "allow" | "block" | "challenge" | undefined;
+  const rawLogs = await getTenantTrafficLogs(tenantId);
+  const report = cleanTrafficLogs(
+    rawLogs,
+    aiPolicy ? { aiCrawlerPolicy: aiPolicy } : undefined
+  );
   return c.json(report);
 });
 
@@ -1759,16 +2019,18 @@ dashboardApiRouter.get("/api/dashboard/traffic/overview", (c) => {
  */
 dashboardApiRouter.post("/api/dashboard/traffic/ingest", async (c) => {
   const body = await c.req.json().catch(() => null);
+  const tenantId = body?.tenantId || c.req.query("tenantId") || "default";
   const rawLogs = body?.logs || (await c.req.text().catch(() => ""));
+  let activeLogs = await getTenantTrafficLogs(tenantId);
   if (rawLogs && typeof rawLogs === "string" && rawLogs.trim().length > 0) {
-    if (c.req.query("append") === "true") {
-      currentTrafficLogs = `${currentTrafficLogs}\n${rawLogs}`;
-    } else {
-      currentTrafficLogs = rawLogs;
-    }
+    activeLogs =
+      c.req.query("append") === "true" && activeLogs.trim().length > 0
+        ? `${activeLogs}\n${rawLogs}`
+        : rawLogs;
+    activeLogs = await saveTenantTrafficLogs(tenantId, activeLogs, "manual");
   }
 
-  const report = cleanTrafficLogs(currentTrafficLogs);
+  const report = cleanTrafficLogs(activeLogs, body?.options);
   return c.json({
     status: "analyzed",
     ...report,
@@ -1780,9 +2042,14 @@ dashboardApiRouter.post("/api/dashboard/traffic/ingest", async (c) => {
  * Seeds realistic server access logs containing real human shoppers, verified search crawlers,
  * credential-stuffing botnets, aggressive scrapers, and vulnerability scanners.
  */
-dashboardApiRouter.post("/api/dashboard/traffic/seed-demo", (c) => {
-  currentTrafficLogs = generateRealisticTrafficLogs();
-  const report = cleanTrafficLogs(currentTrafficLogs);
+dashboardApiRouter.post("/api/dashboard/traffic/seed-demo", async (c) => {
+  const tenantId = c.req.query("tenantId") || "default";
+  const seeded = await saveTenantTrafficLogs(
+    tenantId,
+    generateRealisticTrafficLogs(),
+    "demo_seed"
+  );
+  const report = cleanTrafficLogs(seeded);
   return c.json({
     status: "seeded",
     ...report,
@@ -1791,15 +2058,17 @@ dashboardApiRouter.post("/api/dashboard/traffic/seed-demo", (c) => {
 
 /**
  * GET /api/dashboard/traffic/export-rules
- * Exports ready-to-paste firewall / WAF block rules in Nginx, Apache, or Cloudflare format.
+ * Exports ready-to-paste firewall / WAF block rules in Nginx, Apache, Cloudflare, or robots.txt format.
  */
-dashboardApiRouter.get("/api/dashboard/traffic/export-rules", (c) => {
+dashboardApiRouter.get("/api/dashboard/traffic/export-rules", async (c) => {
+  const tenantId = c.req.query("tenantId") || "default";
   const format = c.req.query("format") || "nginx";
-  const report = cleanTrafficLogs(currentTrafficLogs);
+  const rawLogs = await getTenantTrafficLogs(tenantId);
+  const report = cleanTrafficLogs(rawLogs);
 
   let content = report.firewallRules.nginxBlockRules;
   let filename = "truthier-nginx-block.conf";
-  let contentType = "text/plain; charset=utf-8";
+  const contentType = "text/plain; charset=utf-8";
 
   if (format === "apache") {
     content = report.firewallRules.apacheHtaccessRules;
@@ -1807,6 +2076,9 @@ dashboardApiRouter.get("/api/dashboard/traffic/export-rules", (c) => {
   } else if (format === "cloudflare") {
     content = report.firewallRules.cloudflareWafExpression;
     filename = "truthier-cloudflare-waf.txt";
+  } else if (format === "robots") {
+    content = report.firewallRules.robotsTxtRules;
+    filename = "robots.txt";
   }
 
   return new Response(content, {

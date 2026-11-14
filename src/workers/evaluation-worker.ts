@@ -28,6 +28,14 @@ export interface InMemorySubmissionRecord {
   wpCommentId: number;
   entityId: string;
   authorSessionHash: string;
+  authorHandle?: string | null;
+  accountCreatedAt?: Date | string | null;
+  replyToCommentId?: number | null;
+  sharedUrl?: string | null;
+  deviceFingerprint?: string | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+  telemetrySummary?: Record<string, any> | null;
   rawText: string;
   rating: number | null;
   authorType: "human" | "bot";
@@ -103,6 +111,14 @@ async function ensureOriginColumnsOnce(): Promise<void> {
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_lat double precision`;
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_lng double precision`;
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_network text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS ip_address text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS user_agent text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS author_handle text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS account_created_at timestamp`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS reply_to_comment_id integer`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS shared_url text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS device_fingerprint text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS telemetry_summary jsonb`;
   } catch {
     // Postgres might be unreachable in unit tests / offline mode
   }
@@ -111,6 +127,8 @@ async function ensureOriginColumnsOnce(): Promise<void> {
 export interface EvaluationJobData {
   tenantId: string; wpCommentId: number; entityId: string; entityTitle?: string;
   authorSessionHash: string; rawText: string; rating?: number | null;
+  authorHandle?: string | null; accountCreatedAt?: string | null;
+  replyToCommentId?: number | null; sharedUrl?: string | null; deviceFingerprint?: string | null;
   botResult: BotEvaluationResult; ipAddress: string; userAgent: string;
   thresholdMode: ThresholdMode;
 }
@@ -186,6 +204,22 @@ export async function analyzeText(text: string, mode: ThresholdMode) {
   return { ...scored, route, escalateToResearch, visibility, modelUsed, deepResearchExplanation: explanation, researchEvidence };
 }
 
+function extractSubmissionMeta(data: EvaluationJobData) {
+  const accountCreatedDate = data.accountCreatedAt ? new Date(data.accountCreatedAt) : null;
+  const validAccountCreatedAt =
+    accountCreatedDate && !Number.isNaN(accountCreatedDate.getTime()) ? accountCreatedDate : null;
+  return {
+    ipAddress: data.ipAddress,
+    userAgent: data.userAgent,
+    authorHandle: data.authorHandle ?? null,
+    accountCreatedAt: validAccountCreatedAt,
+    replyToCommentId: data.replyToCommentId ?? null,
+    sharedUrl: data.sharedUrl ?? null,
+    deviceFingerprint: data.deviceFingerprint ?? null,
+    telemetrySummary: data.botResult?.telemetry ?? null,
+  };
+}
+
 export async function processEvaluationJob(data: EvaluationJobData) {
   const { tenantId, wpCommentId, entityId, rawText, authorSessionHash, rating, botResult } = data;
 
@@ -243,6 +277,7 @@ export async function processEvaluationJob(data: EvaluationJobData) {
       });
       const embedding = computeLocalEmbedding(rawText, []);
       let savedId: string | null = null;
+      const meta = extractSubmissionMeta(data);
       await db.transaction(async tx => {
         const [saved] = await tx.insert(submissions).values({
           wpCommentId,
@@ -267,6 +302,7 @@ export async function processEvaluationJob(data: EvaluationJobData) {
           originLat: origin.lat,
           originLng: origin.lng,
           originNetwork: origin.networkType,
+          ...meta,
         }).onConflictDoNothing({ target: [submissions.tenantId, submissions.wpCommentId] }).returning();
         if (saved) {
           savedId = saved.id;
@@ -287,6 +323,7 @@ export async function processEvaluationJob(data: EvaluationJobData) {
           wpCommentId,
           entityId,
           authorSessionHash,
+          ...meta,
           rawText,
           rating: rating ?? null,
           authorType: "bot",
@@ -372,6 +409,7 @@ export async function processEvaluationJob(data: EvaluationJobData) {
         countryHeader: (data as any).countryHeader || null,
       });
       const embedding = computeLocalEmbedding(rawText, []);
+      const meta = extractSubmissionMeta(data);
       let savedId: string | null = null;
       await db.transaction(async tx => {
         const [saved] = await tx.insert(submissions).values({
@@ -397,6 +435,7 @@ export async function processEvaluationJob(data: EvaluationJobData) {
           originLat: origin.lat,
           originLng: origin.lng,
           originNetwork: origin.networkType,
+          ...meta,
         }).onConflictDoNothing({ target: [submissions.tenantId, submissions.wpCommentId] }).returning();
         if (saved) {
           savedId = saved.id;
@@ -422,6 +461,7 @@ export async function processEvaluationJob(data: EvaluationJobData) {
           wpCommentId,
           entityId,
           authorSessionHash,
+          ...meta,
           rawText,
           rating: rating ?? null,
           authorType: "bot",
@@ -478,6 +518,7 @@ export async function processEvaluationJob(data: EvaluationJobData) {
 
   try {
     await ensureOriginColumnsOnce();
+    const meta = extractSubmissionMeta(data);
     let savedId: string | null = null;
     await db.transaction(async tx => {
       const [saved] = await tx.insert(submissions).values({
@@ -493,6 +534,7 @@ export async function processEvaluationJob(data: EvaluationJobData) {
         originLat: origin.lat,
         originLng: origin.lng,
         originNetwork: origin.networkType,
+        ...meta,
       }).onConflictDoNothing({ target: [submissions.tenantId, submissions.wpCommentId] }).returning();
       if (saved) savedId = saved.id;
     });
@@ -507,6 +549,7 @@ export async function processEvaluationJob(data: EvaluationJobData) {
         wpCommentId,
         entityId,
         authorSessionHash,
+        ...meta,
         rawText,
         rating: rating ?? null,
         authorType: "human",

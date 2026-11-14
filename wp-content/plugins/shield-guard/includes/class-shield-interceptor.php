@@ -23,6 +23,7 @@ class Shield_Interceptor {
             $query->query_vars['cache_domain'] = 'shield_' . $this->get_viewer_session_hash();
         });
         add_action('wp_insert_comment', array($this, 'on_insert_comment'), 10, 2);
+        add_action('wp_login_failed', array($this, 'on_login_failed'), 10, 1);
         add_filter('comments_clauses', array($this, 'filter_comments_clauses'), 10, 2);
         // Filter the displayed comment count so public visitors only see the count of visible comments,
         // and bots only see the count of public comments + their own comments!
@@ -92,6 +93,21 @@ class Shield_Interceptor {
         $ai_trap_val = isset($_POST['_shield_ai_trap']) ? sanitize_text_field($_POST['_shield_ai_trap']) : '';
         $rating = isset($_POST['rating']) ? intval($_POST['rating']) : null;
 
+        $author_handle = !empty($comment_object->comment_author) ? sanitize_text_field($comment_object->comment_author) : null;
+        $reply_to_id = !empty($comment_object->comment_parent) ? intval($comment_object->comment_parent) : null;
+        $shared_url = !empty($comment_object->comment_author_url) ? esc_url_raw($comment_object->comment_author_url) : null;
+        $account_created_at = null;
+        if (!empty($comment_object->user_id)) {
+            $u = get_userdata($comment_object->user_id);
+            if ($u && !empty($u->user_registered)) {
+                $account_created_at = gmdate('c', strtotime($u->user_registered));
+            }
+        }
+        $accept_lang = isset($_SERVER['HTTP_ACCEPT_LANGUAGE']) ? sanitize_text_field($_SERVER['HTTP_ACCEPT_LANGUAGE']) : '';
+        $device_fp = isset($_POST['_shield_device_fp'])
+            ? sanitize_text_field($_POST['_shield_device_fp'])
+            : substr(hash('sha256', ($comment_object->comment_agent ?? '') . '|' . $accept_lang), 0, 24);
+
         $post_id = $comment_object->comment_post_ID;
         $post = get_post($post_id);
         $entity_title = $post ? $post->post_title : 'Post #' . $post_id;
@@ -108,6 +124,11 @@ class Shield_Interceptor {
             'entityId'           => strval($post_id),
             'entityTitle'        => $entity_title,
             'authorSessionHash'  => $author_hash,
+            'authorHandle'       => $author_handle,
+            'accountCreatedAt'   => $account_created_at,
+            'replyToCommentId'   => $reply_to_id,
+            'sharedUrl'          => !empty($shared_url) ? $shared_url : null,
+            'deviceFingerprint'  => $device_fp,
             'rawText'            => $comment_object->comment_content,
             'rating'             => $rating,
             'telemetryToken'     => $telemetry_token,
@@ -119,6 +140,46 @@ class Shield_Interceptor {
 
         update_comment_meta($comment_id, '_shield_ingest_payload', wp_slash(wp_json_encode($payload)));
         $this->dispatch_comment($comment_id);
+    }
+
+    /**
+     * Hook wp_login_failed: streams real WordPress authentication failure events
+     * to Clean the Traffic (/v1/traffic/event) with targeted username hints.
+     */
+    public function on_login_failed($username) {
+        $options = get_option('shield_guard_settings', array());
+        $configured_url = !empty($options['api_url']) ? rtrim($options['api_url'], '/') : 'http://127.0.0.1:4000';
+        if (strpos($configured_url, '127.0.0.1:4000') !== false || strpos($configured_url, 'localhost:4000') !== false) {
+            $api_url = file_exists('/.dockerenv') ? 'http://host.docker.internal:4000' : $configured_url;
+        } else {
+            $api_url = $configured_url;
+        }
+        $api_key = !empty($options['api_key']) ? $options['api_key'] : 'default_tenant';
+        $visitor_ip = !empty($_SERVER['HTTP_CF_CONNECTING_IP'])
+            ? sanitize_text_field($_SERVER['HTTP_CF_CONNECTING_IP'])
+            : (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])
+                ? sanitize_text_field(trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]))
+                : (!empty($_SERVER['REMOTE_ADDR']) ? sanitize_text_field($_SERVER['REMOTE_ADDR']) : '127.0.0.1'));
+        $visitor_ua = !empty($_SERVER['HTTP_USER_AGENT']) ? sanitize_text_field($_SERVER['HTTP_USER_AGENT']) : 'unknown';
+
+        wp_remote_post($api_url . '/v1/traffic/event', array(
+            'method'      => 'POST',
+            'blocking'    => false,
+            'timeout'     => 1,
+            'headers'     => array(
+                'Content-Type' => 'application/json',
+                'X-Shield-Key' => $api_key,
+            ),
+            'body'        => wp_json_encode(array(
+                'ipAddress'  => $visitor_ip,
+                'method'     => 'POST',
+                'path'       => '/wp-login.php',
+                'statusCode' => 401,
+                'userAgent'  => $visitor_ua,
+                'username'   => sanitize_user(strval($username), true),
+            )),
+            'data_format' => 'body',
+        ));
     }
 
     public function dispatch_comment($comment_id) {

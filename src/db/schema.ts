@@ -34,8 +34,22 @@ export const submissions = pgTable("submissions", {
   originLat: doublePrecision("origin_lat"),
   originLng: doublePrecision("origin_lng"),
   originNetwork: text("origin_network"),
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  authorHandle: text("author_handle"),
+  accountCreatedAt: timestamp("account_created_at"),
+  replyToCommentId: integer("reply_to_comment_id"),
+  sharedUrl: text("shared_url"),
+  deviceFingerprint: text("device_fingerprint"),
+  telemetrySummary: jsonb("telemetry_summary").$type<Record<string, unknown>>(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [uniqueIndex("submissions_tenant_comment_idx").on(table.tenantId, table.wpCommentId)]);
+
+export const trafficLogs = pgTable("traffic_logs", {
+  tenantId: text("tenant_id").primaryKey(),
+  rawLogs: text("raw_logs").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
 
 export const honeypotVault = pgTable("honeypot_vault", {
   id: uuid("id").defaultRandom().primaryKey(),

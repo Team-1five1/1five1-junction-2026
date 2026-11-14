@@ -125,6 +125,8 @@ export function DashboardApp() {
   const [trafficData, setTrafficData] = useState<any>(null);
   const [customLogsInput, setCustomLogsInput] = useState<string>("");
   const [trafficNotice, setTrafficNotice] = useState<string>("");
+  const [socialDatasetInput, setSocialDatasetInput] = useState<string>("");
+  const [swarmNotice, setSwarmNotice] = useState<string>("");
 
   // Regional Scanner state
   const [selectedRegion, setSelectedRegion] = useState<string>("all");
@@ -1642,6 +1644,81 @@ export function DashboardApp() {
               </Card>
             </div>
 
+            {/* Social Platform Dataset Importer (CSV / JSON) */}
+            <Card className="border-border bg-card">
+              <CardHeader className="pb-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div>
+                  <CardTitle className="text-base font-bold">
+                    Social Platform Dataset Importer (CSV / JSON)
+                  </CardTitle>
+                  <CardDescription className="text-xs mt-0.5">
+                    Import exported X, Reddit, forum, or review threads (handles, timestamps, reply chains, URLs, device fingerprints) into the swarm detector.
+                  </CardDescription>
+                </div>
+                <button
+                  onClick={async () => {
+                    const res = await fetch("/api/dashboard/swarms/import", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ loadSample: true, mode: "replace" }),
+                    });
+                    if (res.ok) {
+                      const data = await res.json();
+                      setSwarmsData(data);
+                      if (data.sampleDatasetCsv) setSocialDatasetInput(data.sampleDatasetCsv);
+                      setSwarmNotice(
+                        `Imported ${data.importedCount ?? 0} sample social platform posts and re-ran swarm correlation.`
+                      );
+                      setTimeout(() => setSwarmNotice(""), 5000);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-secondary/60 px-3 py-1.5 text-xs font-semibold hover:bg-secondary cursor-pointer shrink-0"
+                >
+                  📂 Load Sample Social Astroturf Dataset (CSV)
+                </button>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {swarmNotice && (
+                  <div className="rounded-md bg-primary/10 border border-primary/30 p-2 text-xs text-primary font-medium">
+                    {swarmNotice}
+                  </div>
+                )}
+                <textarea
+                  rows={4}
+                  value={socialDatasetInput}
+                  onChange={(e) => setSocialDatasetInput(e.target.value)}
+                  placeholder="Paste CSV (post_id,author_handle,author_id,created_at,text,target_id,reply_to_id,shared_url,device_fingerprint,account_created_at,ip_address) or JSON array of social posts..."
+                  className="w-full rounded-md border border-border bg-background p-2.5 font-mono text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[11px] text-muted-foreground">
+                    Supports paraphrased semantic matching, multi-window co-activity bursts, handle similarity &amp; reply amplification chains.
+                  </span>
+                  <button
+                    onClick={async () => {
+                      if (!socialDatasetInput.trim()) return;
+                      const res = await fetch("/api/dashboard/swarms/import", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ dataset: socialDatasetInput, mode: "replace" }),
+                      });
+                      if (res.ok) {
+                        const data = await res.json();
+                        setSwarmsData(data);
+                        setSwarmNotice(`Analyzed ${data.importedCount ?? 0} imported social post(s).`);
+                        setTimeout(() => setSwarmNotice(""), 5000);
+                      } else {
+                        setSwarmNotice("Could not parse CSV/JSON dataset. Check columns or JSON array format.");
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90 cursor-pointer"
+                  >
+                    🔍 Analyze Dataset
+                  </button>
+                </div>
+              </CardContent>
+            </Card>
+
             {/* Swarm Clusters List */}
             {(!swarmsData?.swarms || swarmsData.swarms.length === 0) ? (
               <Card className="p-8 text-center">
@@ -1748,6 +1825,102 @@ export function DashboardApp() {
                         </div>
                       </div>
 
+                      {/* Amplification & Cross-Engine Threat Correlation Row */}
+                      {(swarm.amplificationMetrics || (swarm.correlatedTrafficThreats && swarm.correlatedTrafficThreats.length > 0)) && (
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                          {swarm.amplificationMetrics && (
+                            <div className="rounded-lg border border-border p-3 bg-secondary/10">
+                              <div className="text-muted-foreground font-semibold">Amplification Chain</div>
+                              <div className="mt-1 font-mono font-bold text-foreground">
+                                Originator: {swarm.amplificationMetrics.originatorSession.slice(0, 12)} &bull; {swarm.amplificationMetrics.amplifierCount} Amplifier(s)
+                              </div>
+                              <div className="mt-0.5 text-muted-foreground truncate">
+                                {swarm.amplificationMetrics.sharedUrlsOrCodes?.length > 0
+                                  ? `Shared tokens: ${swarm.amplificationMetrics.sharedUrlsOrCodes.slice(0, 3).join(", ")}`
+                                  : `Reply chains: ${swarm.amplificationMetrics.replyChainCount} | Velocity: ${swarm.amplificationMetrics.amplificationVelocityPerMin}/min`}
+                              </div>
+                            </div>
+                          )}
+
+                          {swarm.accountSimilarityMetrics && (
+                            <div className="rounded-lg border border-border p-3 bg-secondary/10">
+                              <div className="text-muted-foreground font-semibold">Account &amp; Fingerprint Signals</div>
+                              <div className="mt-1 font-mono font-bold text-foreground">
+                                Handle Sim: {Math.round((swarm.accountSimilarityMetrics.avgHandleSimilarity || 0) * 100)}% &bull; New Accts: {swarm.accountSimilarityMetrics.synchronizedNewAccountsCount || 0}
+                              </div>
+                              <div className="mt-0.5 text-muted-foreground">
+                                {swarm.accountSimilarityMetrics.crossSubnetRotationDetected
+                                  ? "⚠️ Cross-subnet proxy rotation matched by fingerprint"
+                                  : "Standard session footprint"}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="rounded-lg border border-destructive/30 p-3 bg-destructive/5">
+                            <div className="text-muted-foreground font-semibold">Server Log Correlation (Clean Traffic Bridge)</div>
+                            <div className="mt-1 font-mono font-bold text-destructive">
+                              {swarm.correlatedTrafficThreats?.length > 0
+                                ? `${swarm.correlatedTrafficThreats.length} IP/Subnet Match(es)`
+                                : "0 Log Matches"}
+                            </div>
+                            <div className="mt-0.5 text-muted-foreground truncate">
+                              {swarm.correlatedTrafficThreats?.length > 0
+                                ? swarm.correlatedTrafficThreats[0]
+                                : "No overlap with flagged access log attackers"}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Synchronized Burst Timeline Strip & Co-Activity Windows */}
+                      {swarm.timelineBuckets && swarm.timelineBuckets.length > 0 && (
+                        <div className="rounded-lg border border-border bg-secondary/10 p-3 space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                            <span className="font-semibold text-foreground">
+                              Posting Burst Timeline ({swarm.timelineBuckets.length} window buckets)
+                            </span>
+                            <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-muted-foreground">
+                              {swarm.cadenceMetrics?.coActivityWindows !== undefined && (
+                                <Badge variant="outline" className="text-[10px]">
+                                  {swarm.cadenceMetrics.coActivityWindows} co-activity window(s)
+                                </Badge>
+                              )}
+                              {swarm.cadenceMetrics?.minPostDeltaSec !== undefined && (
+                                <Badge variant="secondary" className="text-[10px]">
+                                  min delta {swarm.cadenceMetrics.minPostDeltaSec}s
+                                </Badge>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-end gap-1.5 h-12 pt-2">
+                            {(() => {
+                              const maxBucket = Math.max(
+                                1,
+                                ...swarm.timelineBuckets.map((b: any) => Number(b.count || 0))
+                              );
+                              return swarm.timelineBuckets.map((b: any, idx: number) => {
+                                const hPct = Math.max(12, Math.round((Number(b.count || 0) / maxBucket) * 100));
+                                return (
+                                  <div
+                                    key={idx}
+                                    title={`${b.bucketLabel} UTC: ${b.count} post(s)`}
+                                    className="flex-1 flex flex-col items-center gap-1 h-full justify-end"
+                                  >
+                                    <div
+                                      className="w-full rounded-t bg-primary/80 transition-all"
+                                      style={{ height: `${hPct}%` }}
+                                    />
+                                    <span className="text-[9px] font-mono text-muted-foreground truncate max-w-full">
+                                      {b.bucketLabel} ({b.count})
+                                    </span>
+                                  </div>
+                                );
+                              });
+                            })()}
+                          </div>
+                        </div>
+                      )}
+
                       {/* Visual Network Graph Representation */}
                       <div className="rounded-lg border border-border/80 bg-background/50 p-4">
                         <div className="flex items-center justify-between mb-3">
@@ -1767,6 +1940,14 @@ export function DashboardApp() {
                               <span className="h-2 w-2 rounded-full bg-destructive animate-pulse" />
                               <span className="font-mono font-semibold">{node.label}</span>
                               <span className="text-muted-foreground">({node.country} - {node.ip})</span>
+                              {node.role && node.role !== "COORDINATED_NODE" && (
+                                <Badge
+                                  variant={node.role === "ORIGINATOR" ? "destructive" : "secondary"}
+                                  className="text-[10px] px-1 py-0 h-4"
+                                >
+                                  {node.role}
+                                </Badge>
+                              )}
                               {node.rating !== null && (
                                 <Badge variant="outline" className="text-[10px] px-1 py-0 h-4">
                                   {node.rating}★
@@ -1877,6 +2058,14 @@ export function DashboardApp() {
                   >
                     ☁️ Cloudflare WAF
                   </a>
+
+                  <a
+                    href="/api/dashboard/traffic/export-rules?format=robots"
+                    download="robots.txt"
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-semibold hover:bg-secondary cursor-pointer"
+                  >
+                    🤖 Export robots.txt
+                  </a>
                 </div>
               </CardHeader>
 
@@ -1947,7 +2136,7 @@ export function DashboardApp() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 text-center text-xs">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center text-xs">
                   <div className="rounded-lg border border-success/30 bg-success/10 p-3">
                     <div className="text-muted-foreground font-semibold">Real Visitors</div>
                     <div className="text-lg font-bold text-success mt-1">
@@ -1965,6 +2154,26 @@ export function DashboardApp() {
                     </div>
                     <div className="text-[11px] text-muted-foreground">
                       {trafficData?.trafficBreakdown?.verifiedBotCount ?? 0} hits
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-warning/30 bg-warning/10 p-3">
+                    <div className="text-muted-foreground font-semibold">AI Crawlers</div>
+                    <div className="text-lg font-bold text-warning mt-1">
+                      {trafficData?.trafficBreakdown?.aiCrawlerPercent ?? 0}%
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {trafficData?.trafficBreakdown?.aiCrawlerCount ?? 0} hits
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3">
+                    <div className="text-muted-foreground font-semibold">Spoofed Crawlers</div>
+                    <div className="text-lg font-bold text-destructive mt-1">
+                      {trafficData?.trafficBreakdown?.spoofedBotPercent ?? 0}%
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {trafficData?.trafficBreakdown?.spoofedBotCount ?? 0} hits
                     </div>
                   </div>
 
@@ -2011,6 +2220,226 @@ export function DashboardApp() {
               </CardContent>
             </Card>
 
+            {/* Anomaly Spike Alerts & Traffic Time-Series Breakdown */}
+            {((trafficData?.recentSpikeAlerts && trafficData.recentSpikeAlerts.length > 0) ||
+              (trafficData?.timeSeries && trafficData.timeSeries.length > 0)) && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {trafficData?.recentSpikeAlerts && trafficData.recentSpikeAlerts.length > 0 && (
+                  <Card className="border-destructive/40 bg-destructive/5">
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm font-bold text-destructive">
+                        Anomaly Spike Alerts
+                      </CardTitle>
+                      <CardDescription className="text-xs">
+                        Time windows where malicious request volume significantly exceeded baseline average
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-1.5 text-xs">
+                      {trafficData.recentSpikeAlerts.map((alertMsg: string, idx: number) => (
+                        <div
+                          key={idx}
+                          className="rounded border border-destructive/30 bg-background/70 px-2.5 py-1.5 font-mono text-destructive"
+                        >
+                          ⚡ {alertMsg}
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+                )}
+
+                {trafficData?.timeSeries && trafficData.timeSeries.length > 0 && (
+                  <Card className={trafficData?.recentSpikeAlerts?.length > 0 ? "" : "lg:col-span-2"}>
+                    <CardHeader className="pb-2 flex flex-row items-center justify-between">
+                      <div>
+                        <CardTitle className="text-sm font-bold">
+                          Traffic Time-Series Breakdown
+                        </CardTitle>
+                        <CardDescription className="text-xs">
+                          Clean, AI crawler, and malicious request buckets over the log window
+                        </CardDescription>
+                      </div>
+                      <div className="flex items-center gap-2 text-[10px] font-mono">
+                        <span className="text-success">■ Clean</span>
+                        <span className="text-warning">■ AI</span>
+                        <span className="text-destructive">■ Malicious</span>
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="flex items-end gap-2 h-24 pt-2">
+                        {(() => {
+                          const maxBucketTotal = Math.max(
+                            1,
+                            ...trafficData.timeSeries.map(
+                              (b: any) =>
+                                Number(b.cleanCount || 0) +
+                                Number(b.aiCrawlerCount || 0) +
+                                Number(b.maliciousCount || 0)
+                            )
+                          );
+                          return trafficData.timeSeries.map((b: any, idx: number) => {
+                            const clean = Number(b.cleanCount || 0);
+                            const ai = Number(b.aiCrawlerCount || 0);
+                            const mal = Number(b.maliciousCount || 0);
+                            const sum = clean + ai + mal;
+                            const totalPct = Math.max(8, Math.round((sum / maxBucketTotal) * 100));
+                            return (
+                              <div
+                                key={idx}
+                                title={`${b.bucketLabel} UTC — Clean: ${clean}, AI: ${ai}, Malicious: ${mal}`}
+                                className="flex-1 flex flex-col items-center h-full justify-end gap-1"
+                              >
+                                <div
+                                  className="w-full flex flex-col-reverse rounded overflow-hidden bg-secondary/30"
+                                  style={{ height: `${totalPct}%` }}
+                                >
+                                  {clean > 0 && (
+                                    <div
+                                      className="w-full bg-success/80"
+                                      style={{ height: `${Math.round((clean / Math.max(1, sum)) * 100)}%` }}
+                                    />
+                                  )}
+                                  {ai > 0 && (
+                                    <div
+                                      className="w-full bg-warning/80"
+                                      style={{ height: `${Math.round((ai / Math.max(1, sum)) * 100)}%` }}
+                                    />
+                                  )}
+                                  {mal > 0 && (
+                                    <div
+                                      className="w-full bg-destructive/80"
+                                      style={{ height: `${Math.round((mal / Math.max(1, sum)) * 100)}%` }}
+                                    />
+                                  )}
+                                </div>
+                                <span className="text-[9px] font-mono text-muted-foreground truncate max-w-full">
+                                  {b.bucketLabel}
+                                </span>
+                              </div>
+                            );
+                          });
+                        })()}
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+              </div>
+            )}
+
+            {/* Site-Owner Action Plan & Impact Summary */}
+            {trafficData?.ownerSummary && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <CardTitle className="text-base font-bold">Site-Owner Action Plan &amp; Bandwidth Impact</CardTitle>
+                      <CardDescription className="text-xs">
+                        Prioritized actions and projected clean traffic after applying generated firewall rules.
+                      </CardDescription>
+                    </div>
+                    <Badge variant="outline" className="text-xs font-mono">
+                      Post-WAF Clean Traffic: {trafficData.ownerSummary.estimatedCleanAfterRulesPercent}%
+                    </Badge>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                    <div className="rounded-lg border border-border p-3 bg-secondary/20">
+                      <div className="text-muted-foreground font-semibold">Wasted Bot Bandwidth</div>
+                      <div className="mt-1 font-mono font-bold text-destructive text-base">
+                        {trafficData.ownerSummary.wastedBandwidthFormatted}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-border p-3 bg-secondary/20">
+                      <div className="text-muted-foreground font-semibold">Spoofed Crawler Hits</div>
+                      <div className="mt-1 font-mono font-bold text-destructive text-base">
+                        {trafficData.ownerSummary.spoofedBotRequestsCount}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-border p-3 bg-secondary/20">
+                      <div className="text-muted-foreground font-semibold">Distributed Campaigns</div>
+                      <div className="mt-1 font-mono font-bold text-primary text-base">
+                        {trafficData.ownerSummary.distributedAttacksDetected}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-border p-3 bg-secondary/20">
+                      <div className="text-muted-foreground font-semibold">Account Takeover Alerts</div>
+                      <div className="mt-1 font-mono font-bold text-destructive text-base">
+                        {trafficData.ownerSummary.accountTakeoverAlerts}
+                      </div>
+                    </div>
+                  </div>
+
+                  {trafficData.ownerSummary.prioritizedActions?.length > 0 && (
+                    <div className="space-y-2">
+                      {trafficData.ownerSummary.prioritizedActions.map((act: any, idx: number) => (
+                        <div
+                          key={idx}
+                          className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-lg border border-border p-3 bg-background/60 text-xs"
+                        >
+                          <div className="space-y-0.5">
+                            <div className="flex items-center gap-2 font-semibold text-foreground">
+                              <Badge
+                                variant={
+                                  act.priority === "IMMEDIATE"
+                                    ? "destructive"
+                                    : act.priority === "HIGH"
+                                    ? "warning"
+                                    : "secondary"
+                                }
+                                className="text-[10px]"
+                              >
+                                {act.priority}
+                              </Badge>
+                              <span>{act.title}</span>
+                            </div>
+                            <div className="text-muted-foreground">{act.impact}</div>
+                          </div>
+                          <code className="rounded bg-secondary/60 px-2 py-1 font-mono text-[11px] text-foreground shrink-0">
+                            {act.rulePreview}
+                          </code>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Distributed Botnet & Low-and-Slow Campaigns */}
+            {trafficData?.distributedCampaigns && trafficData.distributedCampaigns.length > 0 && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base font-bold">Distributed Botnet &amp; Low-and-Slow Campaigns</CardTitle>
+                  <CardDescription className="text-xs">
+                    Cross-IP coordinated attacks detected across distributed nodes targeting shared endpoints.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {trafficData.distributedCampaigns.map((camp: any) => (
+                    <div
+                      key={camp.id}
+                      className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs space-y-1.5"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="destructive" className="text-[10px]">
+                            {camp.type.replace(/_/g, " ")}
+                          </Badge>
+                          <span className="font-mono font-bold text-foreground">{camp.targetPath}</span>
+                        </div>
+                        <span className="font-mono text-muted-foreground">
+                          {camp.participatingIps.length} IPs &bull; {camp.totalRequests} requests &bull; {camp.failureRatePercent}% failures
+                        </span>
+                      </div>
+                      <div className="text-muted-foreground">
+                        <strong>Signature:</strong> {camp.sharedSignature} &bull; <strong>Action:</strong> {camp.recommendedAction}
+                      </div>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
+
             {/* Top Threat IPs Leaderboard */}
             <Card>
               <CardHeader className="pb-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
@@ -2055,20 +2484,32 @@ export function DashboardApp() {
                               {threat.asnLabel}
                             </TableCell>
                             <TableCell>
-                              <Badge
-                                variant={
-                                  threat.category === "CREDENTIAL_STUFFER" || threat.category === "VULNERABILITY_SCANNER"
-                                    ? "destructive"
-                                    : threat.category === "SCRAPER"
-                                    ? "warning"
-                                    : threat.category === "VERIFIED_BOT"
-                                    ? "outline"
-                                    : "secondary"
-                                }
-                                className="text-[11px]"
-                              >
-                                {threat.category.replace(/_/g, " ")}
-                              </Badge>
+                              <div className="flex flex-col gap-1 items-start">
+                                <Badge
+                                  variant={
+                                    threat.category === "CREDENTIAL_STUFFER" ||
+                                    threat.category === "VULNERABILITY_SCANNER" ||
+                                    threat.category === "SPOOFED_BOT"
+                                      ? "destructive"
+                                      : threat.category === "SCRAPER" || threat.category === "AI_CRAWLER"
+                                      ? "warning"
+                                      : threat.category === "VERIFIED_BOT"
+                                      ? "outline"
+                                      : "secondary"
+                                  }
+                                  className="text-[11px]"
+                                >
+                                  {threat.category.replace(/_/g, " ")}
+                                </Badge>
+                                {threat.authAttackType && (
+                                  <Badge variant="outline" className="text-[9px] font-mono">
+                                    {threat.authAttackType.replace(/_/g, " ")}
+                                    {typeof threat.distinctTargetedUsers === "number" && threat.distinctTargetedUsers > 0
+                                      ? ` (${threat.distinctTargetedUsers}u)`
+                                      : ""}
+                                  </Badge>
+                                )}
+                              </div>
                             </TableCell>
                             <TableCell>
                               <span
@@ -2083,8 +2524,30 @@ export function DashboardApp() {
                                 {threat.riskScore}/100
                               </span>
                             </TableCell>
-                            <TableCell className="text-xs text-foreground max-w-[220px] truncate">
-                              {threat.threatReason}
+                            <TableCell className="text-xs text-foreground max-w-[260px]">
+                              <div className="truncate" title={threat.threatReason}>{threat.threatReason}</div>
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {threat.honeypotTrapHits > 0 && (
+                                  <Badge variant="destructive" className="text-[9px] px-1 py-0 h-4">
+                                    trap ({threat.honeypotTrapHits})
+                                  </Badge>
+                                )}
+                                {threat.sequentialCrawlDetected && (
+                                  <Badge variant="warning" className="text-[9px] px-1 py-0 h-4">
+                                    seq crawl
+                                  </Badge>
+                                )}
+                                {typeof threat.requestRegularityScore === "number" && threat.requestRegularityScore >= 70 && (
+                                  <Badge variant="outline" className="text-[9px] px-1 py-0 h-4 font-mono">
+                                    reg {threat.requestRegularityScore}%
+                                  </Badge>
+                                )}
+                                {threat.robotsTxtFetched && (
+                                  <Badge variant="secondary" className="text-[9px] px-1 py-0 h-4 font-mono">
+                                    robots.txt
+                                  </Badge>
+                                )}
+                              </div>
                             </TableCell>
                             <TableCell className="font-mono text-xs font-bold">
                               {threat.totalRequests}
