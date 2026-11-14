@@ -19,6 +19,7 @@ import {
   resetInMemoryState,
 } from "../workers/evaluation-worker";
 import { getHoneypotVaultStats } from "../engines/honeypot-cluster";
+import { cleanTrafficLogs } from "../engines/traffic-cleaner";
 import { ProviderHttpError } from "../ai/provider-errors";
 
 export const apiRouter = new Hono<{ Variables: { tenant: typeof tenants.$inferSelect } }>();
@@ -125,6 +126,16 @@ apiRouter.post("/v1/analyze", async c => {
     override_triggered: result.overrideTriggered, deep_research_explanation: result.deepResearchExplanation,
     research_evidence: result.researchEvidence,
   });
+});
+
+apiRouter.post("/v1/traffic/clean", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const logs = body?.logs || (await c.req.text().catch(() => ""));
+  if (!logs || typeof logs !== "string" || logs.trim().length === 0) {
+    return c.json({ error: "Access logs content required in 'logs' parameter or request body" }, 400);
+  }
+  const report = cleanTrafficLogs(logs);
+  return c.json(report);
 });
 
 apiRouter.patch("/v1/tenant/mode", async c => {

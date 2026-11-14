@@ -303,6 +303,64 @@ const IP_PREFIX_MAP: Array<{ prefix: string; hubKey: keyof typeof GEO_HUBS }> = 
   { prefix: "13.212.84.", hubKey: "SG_SIN" },
 ];
 
+export interface GlobalRangeEntry {
+  prefix: string;
+  countryCode: string;
+  countryName: string;
+  region: string;
+  regionCode: string;
+  city: string;
+  lat: number;
+  lng: number;
+  networkType: string;
+  asnLabel: string;
+}
+
+export const GLOBAL_IP_RANGES: GlobalRangeEntry[] = [
+  // Google & Googlebot Crawlers
+  { prefix: "66.249.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Mountain View", lat: 37.422, lng: -122.084, networkType: "search_engine_crawler", asnLabel: "AS15169 Googlebot" },
+  { prefix: "64.233.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Mountain View", lat: 37.422, lng: -122.084, networkType: "datacenter_cloud", asnLabel: "AS15169 Google Cloud" },
+  { prefix: "34.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Council Bluffs", lat: 41.2619, lng: -95.8608, networkType: "datacenter_cloud", asnLabel: "AS15169 Google Cloud Platform" },
+  { prefix: "35.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Ashburn", lat: 39.0438, lng: -77.4874, networkType: "datacenter_cloud", asnLabel: "AS15169 Google Cloud Platform" },
+  // Amazon AWS
+  { prefix: "3.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Ashburn", lat: 39.0438, lng: -77.4874, networkType: "datacenter_cloud", asnLabel: "AS16509 Amazon AWS" },
+  { prefix: "18.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Seattle", lat: 47.6062, lng: -122.3321, networkType: "datacenter_cloud", asnLabel: "AS16509 Amazon AWS" },
+  { prefix: "52.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Columbus", lat: 39.9612, lng: -82.9988, networkType: "datacenter_cloud", asnLabel: "AS16509 Amazon AWS" },
+  { prefix: "54.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Ashburn", lat: 39.0438, lng: -77.4874, networkType: "datacenter_cloud", asnLabel: "AS16509 Amazon AWS" },
+  // Microsoft Azure & Bingbot
+  { prefix: "13.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Redmond", lat: 47.674, lng: -122.1215, networkType: "datacenter_cloud", asnLabel: "AS8075 Microsoft Azure" },
+  { prefix: "20.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Des Moines", lat: 41.5868, lng: -93.625, networkType: "datacenter_cloud", asnLabel: "AS8075 Microsoft Azure" },
+  { prefix: "40.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Chicago", lat: 41.8781, lng: -87.6298, networkType: "datacenter_cloud", asnLabel: "AS8075 Microsoft Azure" },
+  { prefix: "157.55.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Redmond", lat: 47.674, lng: -122.1215, networkType: "search_engine_crawler", asnLabel: "AS8075 Bingbot / Microsoft" },
+  // Cloudflare Anycast CDN
+  { prefix: "104.16.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "San Francisco", lat: 37.7749, lng: -122.4194, networkType: "cdn_proxy", asnLabel: "AS13335 Cloudflare" },
+  { prefix: "172.64.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "San Francisco", lat: 37.7749, lng: -122.4194, networkType: "cdn_proxy", asnLabel: "AS13335 Cloudflare" },
+  { prefix: "162.158.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "San Francisco", lat: 37.7749, lng: -122.4194, networkType: "cdn_proxy", asnLabel: "AS13335 Cloudflare" },
+  // DigitalOcean
+  { prefix: "104.131.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "New York", lat: 40.7128, lng: -74.006, networkType: "datacenter_cloud", asnLabel: "AS14061 DigitalOcean" },
+  { prefix: "159.203.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "San Francisco", lat: 37.7749, lng: -122.4194, networkType: "datacenter_cloud", asnLabel: "AS14061 DigitalOcean" },
+  { prefix: "167.99.", countryCode: "DE", countryName: "Germany", region: "Western & Central Europe", regionCode: "region_western_europe", city: "Frankfurt", lat: 50.1109, lng: 8.6821, networkType: "datacenter_cloud", asnLabel: "AS14061 DigitalOcean Frankfurt" },
+  { prefix: "178.62.", countryCode: "GB", countryName: "United Kingdom", region: "Western & Central Europe", regionCode: "region_western_europe", city: "London", lat: 51.5074, lng: -0.1278, networkType: "datacenter_cloud", asnLabel: "AS14061 DigitalOcean London" },
+  // Hetzner Online
+  { prefix: "78.46.", countryCode: "DE", countryName: "Germany", region: "Western & Central Europe", regionCode: "region_western_europe", city: "Nuremberg", lat: 49.4521, lng: 11.0767, networkType: "datacenter_cloud", asnLabel: "AS24940 Hetzner Online" },
+  { prefix: "88.198.", countryCode: "DE", countryName: "Germany", region: "Western & Central Europe", regionCode: "region_western_europe", city: "Falkenstein", lat: 50.4779, lng: 12.3713, networkType: "datacenter_cloud", asnLabel: "AS24940 Hetzner Online" },
+  { prefix: "95.216.", countryCode: "FI", countryName: "Finland", region: "Western & Central Europe", regionCode: "region_western_europe", city: "Helsinki", lat: 60.1699, lng: 24.9384, networkType: "datacenter_cloud", asnLabel: "AS24940 Hetzner Finland" },
+  // OVHcloud
+  { prefix: "51.254.", countryCode: "FR", countryName: "France", region: "Western & Central Europe", regionCode: "region_western_europe", city: "Roubaix", lat: 50.6927, lng: 3.1746, networkType: "datacenter_cloud", asnLabel: "AS16276 OVHcloud" },
+  { prefix: "149.202.", countryCode: "FR", countryName: "France", region: "Western & Central Europe", regionCode: "region_western_europe", city: "Gravelines", lat: 50.9866, lng: 2.1278, networkType: "datacenter_cloud", asnLabel: "AS16276 OVHcloud" },
+  // Global Residential ISPs
+  { prefix: "73.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Washington", lat: 38.9072, lng: -77.0369, networkType: "residential_isp", asnLabel: "AS7922 Comcast Cable" },
+  { prefix: "76.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Philadelphia", lat: 39.9526, lng: -75.1652, networkType: "residential_isp", asnLabel: "AS7922 Comcast Cable" },
+  { prefix: "98.", countryCode: "US", countryName: "United States", region: "North America", regionCode: "region_north_america", city: "Dallas", lat: 32.7767, lng: -96.797, networkType: "residential_isp", asnLabel: "AS7018 AT&T Services" },
+  { prefix: "86.", countryCode: "GB", countryName: "United Kingdom", region: "Western & Central Europe", regionCode: "region_western_europe", city: "London", lat: 51.5074, lng: -0.1278, networkType: "residential_isp", asnLabel: "AS2856 British Telecommunications" },
+  { prefix: "80.", countryCode: "DE", countryName: "Germany", region: "Western & Central Europe", regionCode: "region_western_europe", city: "Berlin", lat: 52.52, lng: 13.405, networkType: "residential_isp", asnLabel: "AS3320 Deutsche Telekom" },
+  { prefix: "90.", countryCode: "FR", countryName: "France", region: "Western & Central Europe", regionCode: "region_western_europe", city: "Paris", lat: 48.8566, lng: 2.3522, networkType: "residential_isp", asnLabel: "AS3215 Orange S.A." },
+  { prefix: "88.114.", countryCode: "FI", countryName: "Finland", region: "Western & Central Europe", regionCode: "region_western_europe", city: "Helsinki", lat: 60.1699, lng: 24.9384, networkType: "residential_isp", asnLabel: "AS719 Telia Finland" },
+  { prefix: "116.", countryCode: "CN", countryName: "China", region: "East & Southeast Asia", regionCode: "region_east_asia", city: "Shenzhen", lat: 22.5431, lng: 114.0579, networkType: "residential_isp", asnLabel: "AS4837 China Unicom" },
+  { prefix: "118.", countryCode: "JP", countryName: "Japan", region: "East & Southeast Asia", regionCode: "region_east_asia", city: "Tokyo", lat: 35.6762, lng: 139.6503, networkType: "residential_isp", asnLabel: "AS4713 NTT Communications" },
+  { prefix: "177.", countryCode: "BR", countryName: "Brazil", region: "South America", regionCode: "region_south_america", city: "São Paulo", lat: -23.5505, lng: -46.6333, networkType: "residential_isp", asnLabel: "AS28573 Claro Brasil" },
+];
+
 const HASH_ORIGIN_MAP: Record<
   string,
   { hubKey: keyof typeof GEO_HUBS; networkOverride?: string; asnOverride?: string }
@@ -480,6 +538,25 @@ export function resolveOriginGeo(params: {
       networkType: hub.networkType,
       asnLabel: hub.asnLabel,
     };
+  }
+
+  // 5b. Match global CIDR / IP prefixes for real-world cloud, search crawlers & residential ISPs
+  if (cleanIp && !isLocalOrPrivateIp(cleanIp)) {
+    const globalMatch = GLOBAL_IP_RANGES.find((g) => cleanIp.startsWith(g.prefix));
+    if (globalMatch) {
+      return {
+        countryCode: globalMatch.countryCode,
+        countryName: globalMatch.countryName,
+        region: globalMatch.region,
+        regionCode: globalMatch.regionCode,
+        city: globalMatch.city,
+        lat: globalMatch.lat,
+        lng: globalMatch.lng,
+        ipAddress: cleanIp,
+        networkType: globalMatch.networkType,
+        asnLabel: globalMatch.asnLabel,
+      };
+    }
   }
 
   // 6. Real unclassified traffic without geo headers

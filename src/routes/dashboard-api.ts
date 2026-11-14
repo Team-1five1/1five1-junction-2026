@@ -20,8 +20,16 @@ import {
   activeThresholdMode,
   type InMemorySubmissionRecord,
 } from "../workers/evaluation-worker";
+import { detectCoordinatedSwarms } from "../engines/coordination-detector";
+import {
+  cleanTrafficLogs,
+  generateRealisticTrafficLogs,
+  type TrafficCleanReport,
+} from "../engines/traffic-cleaner";
 
 export const dashboardApiRouter = new Hono();
+
+let currentTrafficLogs = generateRealisticTrafficLogs();
 
 let schemaChecked = false;
 let pgvectorAvailable = false;
@@ -1704,5 +1712,107 @@ dashboardApiRouter.delete("/api/dashboard/seed", async (c) => {
     mode,
     clearAll: mode === "all",
     ...res,
+  });
+});
+
+/**
+ * GET /api/dashboard/swarms
+ * Detects and returns coordinated bot swarms, brigading networks, and astroturfing campaigns
+ * across posting timing, account similarities, subnet/ASNs, and paraphrased text reuse.
+ */
+dashboardApiRouter.get("/api/dashboard/swarms", async (c) => {
+  const { items } = await loadAllUnifiedSubmissions();
+  const inputSubmissions = items.map((s) => ({
+    id: s.id,
+    wpCommentId: s.wpCommentId,
+    entityId: s.entityId,
+    authorSessionHash: s.authorSessionHash,
+    rawText: s.rawText,
+    rating: s.rating,
+    authorType: s.authorType,
+    visibility: s.visibility,
+    createdAt: s.createdAt,
+    ipAddress: s.honeypot?.ipAddress || "127.0.0.1",
+    userAgent: s.honeypot?.userAgent || "unknown",
+    telemetry: s.honeypot?.telemetry || {},
+    embedding: s.embedding,
+    origin: s.origin,
+  }));
+
+  const result = detectCoordinatedSwarms(inputSubmissions);
+  return c.json(result);
+});
+
+/**
+ * GET /api/dashboard/traffic/overview
+ * Analyzes web-server access logs and returns clean vs malicious traffic breakdown,
+ * top suspicious IPs, credential stuffers, and WAF defense rules.
+ */
+dashboardApiRouter.get("/api/dashboard/traffic/overview", (c) => {
+  const report = cleanTrafficLogs(currentTrafficLogs);
+  return c.json(report);
+});
+
+/**
+ * POST /api/dashboard/traffic/ingest
+ * Ingests custom web-server access log lines (Nginx / Apache / Caddy Combined Log format or JSON).
+ */
+dashboardApiRouter.post("/api/dashboard/traffic/ingest", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const rawLogs = body?.logs || (await c.req.text().catch(() => ""));
+  if (rawLogs && typeof rawLogs === "string" && rawLogs.trim().length > 0) {
+    if (c.req.query("append") === "true") {
+      currentTrafficLogs = `${currentTrafficLogs}\n${rawLogs}`;
+    } else {
+      currentTrafficLogs = rawLogs;
+    }
+  }
+
+  const report = cleanTrafficLogs(currentTrafficLogs);
+  return c.json({
+    status: "analyzed",
+    ...report,
+  });
+});
+
+/**
+ * POST /api/dashboard/traffic/seed-demo
+ * Seeds realistic server access logs containing real human shoppers, verified search crawlers,
+ * credential-stuffing botnets, aggressive scrapers, and vulnerability scanners.
+ */
+dashboardApiRouter.post("/api/dashboard/traffic/seed-demo", (c) => {
+  currentTrafficLogs = generateRealisticTrafficLogs();
+  const report = cleanTrafficLogs(currentTrafficLogs);
+  return c.json({
+    status: "seeded",
+    ...report,
+  });
+});
+
+/**
+ * GET /api/dashboard/traffic/export-rules
+ * Exports ready-to-paste firewall / WAF block rules in Nginx, Apache, or Cloudflare format.
+ */
+dashboardApiRouter.get("/api/dashboard/traffic/export-rules", (c) => {
+  const format = c.req.query("format") || "nginx";
+  const report = cleanTrafficLogs(currentTrafficLogs);
+
+  let content = report.firewallRules.nginxBlockRules;
+  let filename = "truthier-nginx-block.conf";
+  let contentType = "text/plain; charset=utf-8";
+
+  if (format === "apache") {
+    content = report.firewallRules.apacheHtaccessRules;
+    filename = "truthier-htaccess.conf";
+  } else if (format === "cloudflare") {
+    content = report.firewallRules.cloudflareWafExpression;
+    filename = "truthier-cloudflare-waf.txt";
+  }
+
+  return new Response(content, {
+    headers: {
+      "Content-Type": contentType,
+      "Content-Disposition": `attachment; filename="${filename}"`,
+    },
   });
 });

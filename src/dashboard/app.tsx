@@ -39,6 +39,8 @@ import {
   IconSun,
   IconMoon,
   IconGlobe,
+  IconRadar,
+  IconSliders,
 } from "./components/ui";
 import {
   TrafficVolumeChart,
@@ -110,13 +112,19 @@ interface SubmissionItem {
 
 export function DashboardApp() {
   const [darkMode, setDarkMode] = useState(true);
-  const [activeTab, setActiveTab] = useState<"overview" | "map" | "bots" | "search">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "map" | "bots" | "search" | "swarms" | "traffic">("overview");
   const [range, setRange] = useState<"24h" | "7d" | "30d">("7d");
   const [autoPoll, setAutoPoll] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<string>("--:--:--");
 
   // Overview state
   const [overview, setOverview] = useState<any>(null);
+
+  // Swarm & Traffic Cleaner state
+  const [swarmsData, setSwarmsData] = useState<any>(null);
+  const [trafficData, setTrafficData] = useState<any>(null);
+  const [customLogsInput, setCustomLogsInput] = useState<string>("");
+  const [trafficNotice, setTrafficNotice] = useState<string>("");
 
   // Regional Scanner state
   const [selectedRegion, setSelectedRegion] = useState<string>("all");
@@ -181,12 +189,14 @@ export function DashboardApp() {
         country: selectedCountry,
       });
 
-      const [ovRes, subRes, botRes, tagRes, regRes] = await Promise.all([
+      const [ovRes, subRes, botRes, tagRes, regRes, swRes, tfRes] = await Promise.all([
         fetch(`/api/dashboard/overview?range=${range}`),
         fetch(`/api/dashboard/submissions?${params.toString()}`),
         fetch(`/api/dashboard/bots`),
         fetch(`/api/dashboard/tags`),
         fetch(`/api/dashboard/regions?${regParams.toString()}`),
+        fetch(`/api/dashboard/swarms`),
+        fetch(`/api/dashboard/traffic/overview`),
       ]);
 
       if (ovRes.ok) setOverview(await ovRes.json());
@@ -200,6 +210,8 @@ export function DashboardApp() {
       if (botRes.ok) setBotVault(await botRes.json());
       if (tagRes.ok) setTagsCatalog(await tagRes.json());
       if (regRes.ok) setRegionsData(await regRes.json());
+      if (swRes.ok) setSwarmsData(await swRes.json());
+      if (tfRes.ok) setTrafficData(await tfRes.json());
 
       setLastUpdated(new Date().toLocaleTimeString());
     } catch (err) {
@@ -625,6 +637,30 @@ export function DashboardApp() {
                   <IconSearch className="h-3.5 w-3.5" />
                   Smart Search &amp; Tags (
                   {selectedTags.length + (searchQuery || similarToId ? 1 : 0)})
+                </TabsTrigger>
+              </HoverExplanation>
+
+              <HoverExplanation
+                title="Spot the Swarm: Coordinated Astroturfing & Brigading"
+                category="Dashboard Tab"
+                rawKey="swarm_intelligence"
+                description="Detects multi-account coordinated inauthentic behavior, synchronized timing bursts, and cross-post brigading networks rather than isolated posts."
+              >
+                <TabsTrigger value="swarms">
+                  <IconRadar className="h-3.5 w-3.5" />
+                  Swarm Networks ({swarmsData?.activeSwarmCount ?? 0})
+                </TabsTrigger>
+              </HoverExplanation>
+
+              <HoverExplanation
+                title="Clean the Traffic: Web Server Log Analyzer & WAF Defense"
+                category="Dashboard Tab"
+                rawKey="traffic_cleaner"
+                description="Tells malicious bots, scrapers, and credential-stuffing attempts apart from real visitors in web-server logs, with instant firewall rules."
+              >
+                <TabsTrigger value="traffic">
+                  <IconSliders className="h-3.5 w-3.5" />
+                  Clean Traffic &amp; WAF ({trafficData?.cleanVsMaliciousPercent?.maliciousPercent ?? 0}% Threats)
                 </TabsTrigger>
               </HoverExplanation>
             </TabsList>
@@ -1526,6 +1562,617 @@ export function DashboardApp() {
                 />
               </CardContent>
             </Card>
+          </TabsContent>
+
+          {/* ================================================================= */}
+          {/* TAB 5: SPOT THE SWARM (Coordinated Inauthentic Behavior Detector) */}
+          {/* ================================================================= */}
+          <TabsContent value="swarms" className="space-y-6">
+            <Card className="border-border bg-card">
+              <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <CardTitle className="text-lg font-bold flex items-center gap-2">
+                      <IconRadar className="h-5 w-5 text-primary" />
+                      Spot the Swarm: Coordinated Inauthentic Behavior &amp; Astroturfing Detector
+                    </CardTitle>
+                    <Badge variant="outline" className="text-xs">Multi-Account Correlation</Badge>
+                  </div>
+                  <CardDescription className="mt-1">
+                    Detects bot networks, astroturfing campaigns, and cross-post review brigading by correlating
+                    posting timing cadence, account subnet/ASN proximity, and paraphrased text reuse rather than inspecting isolated posts.
+                  </CardDescription>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge variant="secondary" className="px-3 py-1 font-mono text-xs">
+                    {swarmsData?.activeSwarmCount ?? 0} Swarms Identified
+                  </Badge>
+                </div>
+              </CardHeader>
+            </Card>
+
+            {/* Swarm High-Level Metrics */}
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <Card>
+                <CardHeader className="p-4 pb-2">
+                  <CardDescription className="text-xs">Active Swarms Detected</CardDescription>
+                  <CardTitle className="text-2xl font-bold text-primary">
+                    {swarmsData?.activeSwarmCount ?? 0}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-4 pt-0 text-xs text-muted-foreground">
+                  Graph community clusters with &ge;2 collaborating accounts
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="p-4 pb-2">
+                  <CardDescription className="text-xs">Coordinated Member Accounts</CardDescription>
+                  <CardTitle className="text-2xl font-bold text-destructive">
+                    {swarmsData?.totalSwarmMembers ?? 0}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-4 pt-0 text-xs text-muted-foreground">
+                  Unique author sessions mapped to coordination graphs
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="p-4 pb-2">
+                  <CardDescription className="text-xs">Critical Astroturf Brigades</CardDescription>
+                  <CardTitle className="text-2xl font-bold text-destructive">
+                    {swarmsData?.summary?.criticalSwarms ?? 0}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-4 pt-0 text-xs text-muted-foreground">
+                  High-confidence campaigns (&ge;80% coordination score)
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="p-4 pb-2">
+                  <CardDescription className="text-xs">Top Brigaded Target Entities</CardDescription>
+                  <CardTitle className="text-2xl font-bold text-primary">
+                    {swarmsData?.summary?.topTargetEntities?.length ?? 0}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-4 pt-0 text-xs text-muted-foreground">
+                  Target posts / products hit by cross-entity campaigns
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Swarm Clusters List */}
+            {(!swarmsData?.swarms || swarmsData.swarms.length === 0) ? (
+              <Card className="p-8 text-center">
+                <CardTitle className="text-base text-muted-foreground">
+                  No active coordinated swarms detected in the current submission window.
+                </CardTitle>
+                <CardDescription className="mt-2 text-xs">
+                  Run the 4-Bucket Bot Swarm benchmark (<code>bun run test:swarm</code>) or post comments to populate live coordination telemetry.
+                </CardDescription>
+              </Card>
+            ) : (
+              <div className="space-y-6">
+                {swarmsData.swarms.map((swarm: any) => (
+                  <Card key={swarm.id} className="border-border bg-card">
+                    <CardHeader className="border-b border-border/60 pb-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-destructive/10 text-destructive font-mono font-bold text-sm">
+                            🚨
+                          </span>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <CardTitle className="text-base font-bold">{swarm.name}</CardTitle>
+                              <Badge
+                                variant={
+                                  swarm.threatLevel === "CRITICAL"
+                                    ? "destructive"
+                                    : swarm.threatLevel === "ELEVATED"
+                                    ? "warning"
+                                    : "secondary"
+                                }
+                                className="text-xs"
+                              >
+                                {swarm.threatLevel} THREAT
+                              </Badge>
+                              <Badge variant="outline" className="text-xs font-mono">
+                                {swarm.campaignType.replace(/_/g, " ")}
+                              </Badge>
+                            </div>
+                            <CardDescription className="text-xs font-mono text-muted-foreground">
+                              Cluster ID: {swarm.id} &bull; {swarm.memberCount} member accounts &bull; {swarm.totalSubmissions} total submissions
+                            </CardDescription>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          <div className="text-right">
+                            <div className="text-xs text-muted-foreground">Coordination Score</div>
+                            <div className="text-lg font-bold text-primary">{swarm.confidenceScore}%</div>
+                          </div>
+                          <div className="h-8 w-16 bg-secondary rounded-full overflow-hidden flex items-center p-0.5">
+                            <div
+                              className="h-full bg-primary rounded-full transition-all"
+                              style={{ width: `${swarm.confidenceScore}%` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </CardHeader>
+
+                    <CardContent className="space-y-4 pt-4">
+                      {/* Coordination Signals Grid */}
+                      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
+                        <div className="rounded-lg border border-border p-3 bg-secondary/20">
+                          <div className="text-muted-foreground font-semibold">Network Footprint</div>
+                          <div className="mt-1 font-mono font-bold text-foreground">
+                            {swarm.networkFootprint.uniqueSubnets} Subnet(s) &bull; {swarm.networkFootprint.uniqueIps} IP(s)
+                          </div>
+                          <div className="mt-0.5 text-muted-foreground truncate">
+                            {swarm.networkFootprint.topAsns[0] || "Datacenter ASN"}
+                          </div>
+                        </div>
+
+                        <div className="rounded-lg border border-border p-3 bg-secondary/20">
+                          <div className="text-muted-foreground font-semibold">Timing &amp; Cadence</div>
+                          <div className="mt-1 font-mono font-bold text-foreground">
+                            Regularity: {swarm.cadenceMetrics.cadenceRegularityScore}%
+                          </div>
+                          <div className="mt-0.5 text-muted-foreground">
+                            Mean interval: {swarm.cadenceMetrics.interArrivalTimeMeanSec}s (B={swarm.cadenceMetrics.burstiness})
+                          </div>
+                        </div>
+
+                        <div className="rounded-lg border border-border p-3 bg-secondary/20">
+                          <div className="text-muted-foreground font-semibold">Text Reuse &amp; Paraphrasing</div>
+                          <div className="mt-1 font-mono font-bold text-foreground">
+                            Similarity: {Math.round(swarm.textReuseMetrics.avgPairwiseSimilarity * 100)}%
+                          </div>
+                          <div className="mt-0.5 text-muted-foreground">
+                            {swarm.textReuseMetrics.paraphrasedVariantsDetected
+                              ? "⚠️ Paraphrased variants detected"
+                              : "Near-exact template replication"}
+                          </div>
+                        </div>
+
+                        <div className="rounded-lg border border-border p-3 bg-secondary/20">
+                          <div className="text-muted-foreground font-semibold">Brigaded Target Entities</div>
+                          <div className="mt-1 font-mono font-bold text-foreground">
+                            {swarm.targetEntities.length} Target(s) Hit
+                          </div>
+                          <div className="mt-0.5 text-muted-foreground truncate">
+                            {swarm.targetEntities.map((t: any) => `${t.entityId} (${t.count})`).join(", ")}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Visual Network Graph Representation */}
+                      <div className="rounded-lg border border-border/80 bg-background/50 p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                            🕸️ Multi-Account Coordination Graph ({swarm.graphNodes.length} Nodes, {swarm.graphEdges.length} Evidence Edges)
+                          </span>
+                          <span className="text-[11px] text-muted-foreground">
+                            Connected by shared subnet (/24), synchronized timing bursts, and text similarity
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {swarm.graphNodes.map((node: any) => (
+                            <div
+                              key={node.id}
+                              className="flex items-center gap-1.5 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-1 text-xs"
+                            >
+                              <span className="h-2 w-2 rounded-full bg-destructive animate-pulse" />
+                              <span className="font-mono font-semibold">{node.label}</span>
+                              <span className="text-muted-foreground">({node.country} - {node.ip})</span>
+                              {node.rating !== null && (
+                                <Badge variant="outline" className="text-[10px] px-1 py-0 h-4">
+                                  {node.rating}★
+                                </Badge>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                        {swarm.graphEdges.length > 0 && (
+                          <div className="mt-3 flex flex-wrap gap-2 pt-2 border-t border-border/40 text-[11px] text-muted-foreground">
+                            <span className="font-semibold text-foreground">Active Coordination Edges:</span>
+                            {swarm.graphEdges.slice(0, 5).map((e: any, idx: number) => (
+                              <span key={idx} className="rounded bg-secondary/40 px-2 py-0.5 font-mono">
+                                {e.source.slice(0, 8)} &harr; {e.target.slice(0, 8)}: {e.reason} ({Math.round(e.weight * 100)}%)
+                              </span>
+                            ))}
+                            {swarm.graphEdges.length > 5 && (
+                              <span className="text-muted-foreground self-center">
+                                +{swarm.graphEdges.length - 5} more links
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Sample Paraphrased Campaign Text */}
+                      {swarm.sampleTexts && swarm.sampleTexts.length > 0 && (
+                        <div className="rounded-lg border border-border p-3 bg-secondary/10">
+                          <div className="text-xs font-semibold text-foreground mb-1.5">
+                            Sample Coordinated Campaign Phrasing:
+                          </div>
+                          <div className="space-y-1 text-xs italic text-muted-foreground">
+                            {swarm.sampleTexts.map((txt: string, idx: number) => (
+                              <p key={idx} className="truncate">
+                                &bull; &ldquo;{txt}&rdquo;
+                              </p>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Actionable Defense Box */}
+                      <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2">
+                          <IconShield className="h-4 w-4 text-primary shrink-0" />
+                          <span className="text-foreground font-medium">
+                            <strong>Recommended Defense Action:</strong> {swarm.recommendedAction}
+                          </span>
+                        </div>
+                        <Badge variant="default" className="text-xs shrink-0">
+                          Action Ready
+                        </Badge>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </TabsContent>
+
+          {/* ================================================================= */}
+          {/* TAB 6: CLEAN THE TRAFFIC (Web Server Log Analyzer & WAF Defense)  */}
+          {/* ================================================================= */}
+          <TabsContent value="traffic" className="space-y-6">
+            <Card className="border-border bg-card">
+              <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <CardTitle className="text-lg font-bold flex items-center gap-2">
+                      <IconSliders className="h-5 w-5 text-primary" />
+                      Clean the Traffic: Web Server Access Log Analyzer &amp; WAF Defense
+                    </CardTitle>
+                    <Badge variant="outline" className="text-xs">Log-Based Threat Intel</Badge>
+                  </div>
+                  <CardDescription className="mt-1">
+                    Analyzes raw Nginx, Apache, or Caddy web-server access logs to distinguish real visitors and verified search engines
+                    from scrapers, credential-stuffing botnets, and vulnerability probers, generating copy-pasteable firewall block rules.
+                  </CardDescription>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={async () => {
+                      const res = await fetch("/api/dashboard/traffic/seed-demo", { method: "POST" });
+                      if (res.ok) {
+                        setTrafficData(await res.json());
+                        setTrafficNotice("Seeded realistic server logs with credential stuffers, scrapers & human shoppers.");
+                        setTimeout(() => setTrafficNotice(""), 4000);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-secondary/60 px-3 py-1.5 text-xs font-semibold hover:bg-secondary cursor-pointer"
+                  >
+                    🎲 Seed Demo Attack Logs
+                  </button>
+
+                  <a
+                    href="/api/dashboard/traffic/export-rules?format=nginx"
+                    download="truthier-nginx-block.conf"
+                    className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90 cursor-pointer"
+                  >
+                    💾 Export Nginx Rules
+                  </a>
+
+                  <a
+                    href="/api/dashboard/traffic/export-rules?format=cloudflare"
+                    download="truthier-cloudflare-waf.txt"
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-semibold hover:bg-secondary cursor-pointer"
+                  >
+                    ☁️ Cloudflare WAF
+                  </a>
+                </div>
+              </CardHeader>
+
+              {trafficNotice && (
+                <div className="mx-6 mb-4 rounded-md bg-primary/10 border border-primary/30 p-2.5 text-xs text-primary font-medium">
+                  {trafficNotice}
+                </div>
+              )}
+            </Card>
+
+            {/* Traffic High-Level KPIs */}
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <Card>
+                <CardHeader className="p-4 pb-2">
+                  <CardDescription className="text-xs">Total Access Log Requests</CardDescription>
+                  <CardTitle className="text-2xl font-bold text-foreground">
+                    {trafficData?.analyzedLines ?? 0}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-4 pt-0 text-xs text-muted-foreground">
+                  Across {trafficData?.uniqueIpsCount ?? 0} unique client IP addresses
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="p-4 pb-2">
+                  <CardDescription className="text-xs">Clean vs. Malicious Traffic</CardDescription>
+                  <CardTitle className="text-2xl font-bold text-primary">
+                    {trafficData?.cleanVsMaliciousPercent?.cleanPercent ?? 100}% Clean
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-4 pt-0 text-xs text-destructive font-semibold">
+                  {trafficData?.cleanVsMaliciousPercent?.maliciousPercent ?? 0}% Malicious / Unwanted
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="p-4 pb-2">
+                  <CardDescription className="text-xs">Credential-Stuffing Attacks</CardDescription>
+                  <CardTitle className="text-2xl font-bold text-destructive">
+                    {trafficData?.trafficBreakdown?.credentialStufferCount ?? 0}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-4 pt-0 text-xs text-muted-foreground">
+                  Brute force POSTs to /wp-login.php &amp; xmlrpc.php
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="p-4 pb-2">
+                  <CardDescription className="text-xs">High-Risk IPs to Block</CardDescription>
+                  <CardTitle className="text-2xl font-bold text-destructive">
+                    {trafficData?.topThreatIps?.filter((p: any) => p.recommendedAction === "BLOCK").length ?? 0}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-4 pt-0 text-xs text-muted-foreground">
+                  Recommended for immediate firewall rejection
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Threat Categories Breakdown Grid */}
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base font-bold">Traffic Classification &amp; Threat Distribution</CardTitle>
+                <CardDescription className="text-xs">
+                  How incoming server requests are classified based on HTTP method, path traversal, status codes, and behavioral asset loading.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 text-center text-xs">
+                  <div className="rounded-lg border border-success/30 bg-success/10 p-3">
+                    <div className="text-muted-foreground font-semibold">Real Visitors</div>
+                    <div className="text-lg font-bold text-success mt-1">
+                      {trafficData?.trafficBreakdown?.humanPercent ?? 0}%
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {trafficData?.trafficBreakdown?.humanCount ?? 0} hits
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-primary/30 bg-primary/10 p-3">
+                    <div className="text-muted-foreground font-semibold">Verified Bots</div>
+                    <div className="text-lg font-bold text-primary mt-1">
+                      {trafficData?.trafficBreakdown?.verifiedBotPercent ?? 0}%
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {trafficData?.trafficBreakdown?.verifiedBotCount ?? 0} hits
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-warning/30 bg-warning/10 p-3">
+                    <div className="text-muted-foreground font-semibold">Content Scrapers</div>
+                    <div className="text-lg font-bold text-warning mt-1">
+                      {trafficData?.trafficBreakdown?.scraperPercent ?? 0}%
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {trafficData?.trafficBreakdown?.scraperCount ?? 0} hits
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3">
+                    <div className="text-muted-foreground font-semibold">Credential Stuffers</div>
+                    <div className="text-lg font-bold text-destructive mt-1">
+                      {trafficData?.trafficBreakdown?.credentialStufferPercent ?? 0}%
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {trafficData?.trafficBreakdown?.credentialStufferCount ?? 0} hits
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3">
+                    <div className="text-muted-foreground font-semibold">Exploit Probers</div>
+                    <div className="text-lg font-bold text-destructive mt-1">
+                      {trafficData?.trafficBreakdown?.vulnerabilityScannerPercent ?? 0}%
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {trafficData?.trafficBreakdown?.vulnerabilityScannerCount ?? 0} hits
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-border bg-secondary/30 p-3">
+                    <div className="text-muted-foreground font-semibold">DoS Flooders</div>
+                    <div className="text-lg font-bold text-foreground mt-1">
+                      {trafficData?.trafficBreakdown?.dosFlooderPercent ?? 0}%
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {trafficData?.trafficBreakdown?.dosFlooderCount ?? 0} hits
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Top Threat IPs Leaderboard */}
+            <Card>
+              <CardHeader className="pb-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div>
+                  <CardTitle className="text-base font-bold">Threat Leaderboard: Malicious Clients &amp; Bots</CardTitle>
+                  <CardDescription className="text-xs">
+                    Identifies source IPs conducting credential stuffing, headless scraping, or probing for sensitive files.
+                  </CardDescription>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>IP Address &amp; Origin</TableHead>
+                        <TableHead>Network / ASN</TableHead>
+                        <TableHead>Classification</TableHead>
+                        <TableHead>Risk</TableHead>
+                        <TableHead>Attack Signature / Pattern</TableHead>
+                        <TableHead>Total Hits</TableHead>
+                        <TableHead>Action</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {(!trafficData?.topThreatIps || trafficData.topThreatIps.length === 0) ? (
+                        <TableRow>
+                          <TableCell colSpan={7} className="text-center py-6 text-muted-foreground text-xs">
+                            No threat IPs detected yet. Seed demo logs or ingest server logs above.
+                          </TableCell>
+                        </TableRow>
+                      ) : (
+                        trafficData.topThreatIps.slice(0, 15).map((threat: any) => (
+                          <TableRow key={threat.ipAddress}>
+                            <TableCell className="font-mono text-xs font-semibold">
+                              <div>{threat.ipAddress}</div>
+                              <div className="text-[11px] text-muted-foreground font-sans">
+                                {threat.countryName} ({threat.countryCode})
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground truncate max-w-[140px]">
+                              {threat.asnLabel}
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                variant={
+                                  threat.category === "CREDENTIAL_STUFFER" || threat.category === "VULNERABILITY_SCANNER"
+                                    ? "destructive"
+                                    : threat.category === "SCRAPER"
+                                    ? "warning"
+                                    : threat.category === "VERIFIED_BOT"
+                                    ? "outline"
+                                    : "secondary"
+                                }
+                                className="text-[11px]"
+                              >
+                                {threat.category.replace(/_/g, " ")}
+                              </Badge>
+                            </TableCell>
+                            <TableCell>
+                              <span
+                                className={`text-xs font-bold font-mono ${
+                                  threat.riskScore >= 80
+                                    ? "text-destructive"
+                                    : threat.riskScore >= 50
+                                    ? "text-warning"
+                                    : "text-success"
+                                }`}
+                              >
+                                {threat.riskScore}/100
+                              </span>
+                            </TableCell>
+                            <TableCell className="text-xs text-foreground max-w-[220px] truncate">
+                              {threat.threatReason}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs font-bold">
+                              {threat.totalRequests}
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                variant={
+                                  threat.recommendedAction === "BLOCK"
+                                    ? "destructive"
+                                    : threat.recommendedAction === "RATE_LIMIT"
+                                    ? "warning"
+                                    : "secondary"
+                                }
+                                className="text-[10px]"
+                              >
+                                {threat.recommendedAction}
+                              </Badge>
+                            </TableCell>
+                          </TableRow>
+                        ))
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Generated Firewall Rules & Custom Ingest Box */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <Card>
+                <CardHeader className="pb-3">
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="text-sm font-bold flex items-center gap-1.5">
+                      🛡️ Ready-to-Paste Nginx Block Configuration
+                    </CardTitle>
+                    <Badge variant="outline" className="text-[10px] font-mono">nginx.conf</Badge>
+                  </div>
+                  <CardDescription className="text-xs">
+                    Drop these statements into your server block to block all flagged credential stuffers and limit scrapers.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <pre className="rounded-lg bg-secondary/40 p-3 font-mono text-[11px] text-foreground overflow-x-auto max-h-[180px]">
+                    {trafficData?.firewallRules?.nginxBlockRules || "# Run traffic cleaner to generate block rules"}
+                  </pre>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-bold flex items-center gap-1.5">
+                    📥 Ingest Custom Server Access Logs
+                  </CardTitle>
+                  <CardDescription className="text-xs">
+                    Paste raw Nginx/Apache Combined Log lines to classify traffic and generate instant WAF rules.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <textarea
+                    rows={4}
+                    value={customLogsInput}
+                    onChange={(e) => setCustomLogsInput(e.target.value)}
+                    placeholder='185.220.101.5 - - [14/Nov/2026:22:15:30 +0000] "POST /wp-login.php HTTP/1.1" 401 1420 "https://example.com" "Mozilla/5.0..."'
+                    className="w-full rounded-md border border-input bg-background p-2.5 font-mono text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  />
+                  <div className="flex justify-end gap-2">
+                    <button
+                      onClick={async () => {
+                        if (!customLogsInput.trim()) return;
+                        const res = await fetch("/api/dashboard/traffic/ingest", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ logs: customLogsInput }),
+                        });
+                        if (res.ok) {
+                          setTrafficData(await res.json());
+                          setTrafficNotice("Custom server access logs analyzed and classified successfully!");
+                          setTimeout(() => setTrafficNotice(""), 4000);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90 cursor-pointer"
+                    >
+                      🚀 Analyze &amp; Clean Logs
+                    </button>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
           </TabsContent>
         </Tabs>
       </main>
