@@ -1,13 +1,14 @@
 /**
- * Truthier Debug Logger
- * Enabled when env variable TRUTHIER_DEBUG=true, SHIELD_DEBUG=true, or DEBUG=*
+ * Verius Debug Logger
+ * Enabled when env variable VERIUS_DEBUG=true, SHIELD_DEBUG=true, or DEBUG=*
  */
 
 export function isDebugEnabled(): boolean {
-  const envVal = process.env.TRUTHIER_DEBUG || process.env.SHIELD_DEBUG || process.env.DEBUG || "";
+  const envVal = process.env.VERIUS_DEBUG || process.env.TRUTHIER_DEBUG || process.env.SHIELD_DEBUG || process.env.DEBUG || "";
   return (
     envVal === "true" ||
     envVal === "1" ||
+    envVal.toLowerCase().includes("verius") ||
     envVal.toLowerCase().includes("truthier") ||
     envVal.toLowerCase().includes("shield") ||
     envVal === "*"
@@ -30,7 +31,7 @@ export function debugLog(category: string, message: string, details?: any) {
   if (!isDebugEnabled()) return;
 
   const timestamp = new Date().toISOString().substring(11, 23);
-  const prefix = `${COLORS.cyan}[TRUTHIER DEBUG ${timestamp}]${COLORS.reset} ${COLORS.bright}[${category}]${COLORS.reset}`;
+  const prefix = `${COLORS.cyan}[VERIUS DEBUG ${timestamp}]${COLORS.reset} ${COLORS.bright}[${category}]${COLORS.reset}`;
 
   if (details !== undefined) {
     if (typeof details === "object" && details !== null) {
@@ -47,7 +48,7 @@ export function debugDecision(area: string, decision: string, context?: Record<s
   if (!isDebugEnabled()) return;
 
   const timestamp = new Date().toISOString().substring(11, 23);
-  const prefix = `${COLORS.magenta}[TRUTHIER DECISION ${timestamp}]${COLORS.reset} ${COLORS.bright}[${area}]${COLORS.reset}`;
+  const prefix = `${COLORS.magenta}[VERIUS DECISION ${timestamp}]${COLORS.reset} ${COLORS.bright}[${area}]${COLORS.reset}`;
   console.log(`${prefix} 🎯 ${COLORS.green}${decision}${COLORS.reset}`);
 
   if (context && Object.keys(context).length > 0) {

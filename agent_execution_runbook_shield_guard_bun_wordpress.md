@@ -1,7 +1,7 @@
-# Shield Guard: Coordinated Propaganda & Bot Detection Runbook
+# Verius: Coordinated Propaganda & Bot Detection Runbook
 **Target Environment:** Single Hostinger VPS (Ubuntu/Debian)  
 **Stack:** Bun + Hono + Drizzle ORM + PostgreSQL (`pgvector`) + Redis (BullMQ) + WordPress Plugin  
-**AI Models (via Hostinger AI Router):** `jev` (Stage 1 Fast Screener) & `gemini-4-hydrogen` (Stage 2 Heavy Forensic & Live Web Search Grounding)
+**AI Models:** Configurable fast screener via Hostinger AI Router; configurable low-cost research model with Context.dev news/web search and original-page Markdown retrieval. See README.md for current setup and provider limitations.
 
 ---
 
@@ -21,11 +21,11 @@
 - [ ] **3.1** Create the static 50-Question SemEval definition map (`src/config/semeval-questions.ts`).
 - [ ] **3.2** Implement the deterministic SemEval Scorer (`src/engines/semeval-scorer.ts`) with Tier 1–3 weights, Bucket 1 cap, Multi-Bucket Synergy (`+2`), Double Red-Flag override, and Hard Evidence veto.
 - [ ] **3.3** Build Hostinger AI Router client for `jev` (`src/ai/jev-screener.ts`) returning strictly JSON arrays of triggered question IDs (`["Q1", "Q9"]`) with zero prose.
-- [ ] **3.4** Build Hostinger AI Router client for `gemini-4-hydrogen` (`src/ai/hydrogen-research.ts`) handling Route 3/4 deep explanations and live web-search grounding for review-bombing spikes.
+- [ ] **3.4** Build Hostinger AI Router client for `gpt-5-nano` (`src/ai/grounded-research.ts`) handling Route 3/4 deep explanations and live web-search grounding for review-bombing spikes.
 
 ### 4. Review Bombing & Honeypot Workers
 - [ ] **4.1** Implement Hono API routes (`src/routes/api.ts`) on `127.0.0.1:4000` (`POST /v1/ingest`, `POST /v1/analyze`, `PATCH /v1/tenant/mode`).
-- [ ] **4.2** Implement BullMQ Evaluation & Velocity Worker (`src/workers/evaluation-worker.ts`) to orchestrate `jev` -> Scorer -> `gemini-4-hydrogen` -> WordPress loopback webhook.
+- [ ] **4.2** Implement BullMQ Evaluation & Velocity Worker (`src/workers/evaluation-worker.ts`) to orchestrate `jev` -> Scorer -> `gpt-5-nano` -> WordPress loopback webhook.
 - [ ] **4.3** Configure and enable `/etc/systemd/system/shield-bun.service` for automatic background execution.
 
 ### 5. WordPress Plugin & Invisible Telemetry
@@ -91,7 +91,8 @@
    HOSTINGER_AI_ROUTER_URL=https://ai-router.hostinger.com/v1
    HOSTINGER_AI_API_KEY=replace_with_hostinger_ai_router_key
    MODEL_FAST_SCREENER=jev
-   MODEL_HEAVY_RESEARCH=gemini-4-hydrogen
+   MODEL_HEAVY_RESEARCH=gpt-5-nano
+   CONTEXT_DEV_API_KEY=your_context_dev_api_key
    TELEMETRY_SECRET_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
    WP_WEBHOOK_SECRET=replace_with_shared_wp_hmac_secret
    WP_DEFAULT_WEBHOOK_URL=http://127.0.0.1/wp-json/shield/v1/webhook
@@ -133,12 +134,12 @@ export const submissions = pgTable("submissions", {
   authorType: text("author_type").notNull(), // 'human' | 'bot'
   visibility: text("visibility").notNull(), // 'pending' | 'public' | 'public_flagged' | 'shadowbanned'
   routingPath: text("routing_path").notNull(),
-  modelUsed: text("model_used").notNull(), // 'none' | 'jev' | 'gemini-4-hydrogen'
+  modelUsed: text("model_used").notNull(), // 'none' | 'jev' | 'gpt-5-nano'
   riskScore: integer("risk_score").default(0).notNull(),
   shieldFlags: integer("shield_flags").default(0).notNull(),
   failedRiskIds: jsonb("failed_risk_ids").$type<string[]>().default([]).notNull(),
   triggeredShieldIds: jsonb("triggered_shield_ids").$type<string[]>().default([]).notNull(),
-  deepResearchExplanation: text("deep_research_explanation"), // null unless gemini-4-hydrogen is triggered
+  deepResearchExplanation: text("deep_research_explanation"), // null unless gpt-5-nano is triggered
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -248,7 +249,7 @@ export interface SemEvalResult {
     | "ROUTE_2_SHIELDED_CLEAR"
     | "ROUTE_3_STANCE_VERIFICATION"
     | "ROUTE_4_FORENSIC_THREAT";
-  escalateToHydrogen: boolean;
+  escalateToResearch: boolean;
 }
 
 const BUCKET_MAP: Record<number, number[]> = {
@@ -341,7 +342,7 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
       failedRiskIds,
       triggeredShieldIds,
       route: "ROUTE_4_FORENSIC_THREAT",
-      escalateToHydrogen: true,
+      escalateToResearch: true,
     };
   }
 
@@ -356,7 +357,7 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
       failedRiskIds,
       triggeredShieldIds,
       route: "ROUTE_3_STANCE_VERIFICATION",
-      escalateToHydrogen: true,
+      escalateToResearch: true,
     };
   }
 
@@ -374,7 +375,7 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
       failedRiskIds,
       triggeredShieldIds,
       route: "ROUTE_4_FORENSIC_THREAT",
-      escalateToHydrogen: true,
+      escalateToResearch: true,
     };
   }
 
@@ -389,7 +390,7 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
       failedRiskIds,
       triggeredShieldIds,
       route: "ROUTE_2_SHIELDED_CLEAR",
-      escalateToHydrogen: false,
+      escalateToResearch: false,
     };
   }
 
@@ -403,29 +404,29 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
     failedRiskIds,
     triggeredShieldIds,
     route: "ROUTE_1_FAST_CLEAR",
-    escalateToHydrogen: false,
+    escalateToResearch: false,
   };
 }
 ```
 
 ---
 
-### `AGENT_TASK_04`: Hostinger AI Router Clients (`jev` & `gemini-4-hydrogen`)
-**Objective:** Build the two external model wrappers talking to `HOSTINGER_AI_ROUTER_URL`.
+### `AGENT_TASK_04`: Hostinger AI Router Clients (`jev` & `gpt-5-nano`)
+**Objective:** Build the fast screener through `HOSTINGER_AI_ROUTER_URL` and research-model calls through Hostinger AI Router. Research evidence is supplied by Context.dev Web Search, News Search, and Scrape using `CONTEXT_DEV_API_KEY`.
 
 1. **Stage 1 Fast Screener (`src/ai/jev-screener.ts`):**
    * Calls `model: process.env.MODEL_FAST_SCREENER` (`jev`).
    * Passes the 50 binary questions in the system prompt and requests a strict JSON response: `{"triggered": ["Q1", "Q9", "Q50"]}`.
    * Zero prose or explanation is generated at this stage.
 
-2. **Stage 2 Heavy Escalation & Grounding (`src/ai/hydrogen-research.ts`):**
-   * Calls `model: process.env.MODEL_HEAVY_RESEARCH` (`gemini-4-hydrogen`).
+2. **Stage 2 Heavy Escalation & Grounding (`src/ai/grounded-research.ts`):**
+   * Selects `process.env.MODEL_HEAVY_RESEARCH` (low-cost default: `gpt-5-nano`). Use Context.dev Web Search and News Search for research evidence; retrieve primary source pages with Context.dev Scrape before verifying quotations. Persist sources and quote checks. Unavailable tools are errors; missing quote context is unverified, never a confirmed flag.
    * **Method A (`verifyStanceOrForensic`):**
-     * If `route === 'ROUTE_3_STANCE_VERIFICATION'`, prompts `gemini-4-hydrogen` to verify whether the author is quoting/reporting/debunking (`endorsed: false`) or pushing manipulation (`endorsed: true`). If `endorsed: false`, returns `deepResearchExplanation: null` and clears the post.
+     * If `route === 'ROUTE_3_STANCE_VERIFICATION'`, prompts `gpt-5-nano` to verify whether the author is quoting/reporting/debunking (`endorsed: false`) or pushing manipulation (`endorsed: true`). If `endorsed: false`, returns `deepResearchExplanation: null` and clears the post.
      * If `route === 'ROUTE_4_FORENSIC_THREAT'` (or `endorsed: true`), returns a concise, neutral `deepResearchExplanation` string summarizing why the triggered IDs (`failedRiskIds`) represent manipulative framing and cross-checking any factual claims.
    * **Method B (`investigateReviewBombing`):**
      * Invoked when human 1-star review velocity spikes on a product/post.
-     * Uses `gemini-4-hydrogen` with live web search enabled to check news, patch notes, outages, or controversies for `entity_title` over the past 72 hours.
+     * Uses `gpt-5-nano` with live web search enabled to check news, patch notes, outages, or controversies for `entity_title` over the past 72 hours.
      * If a real-world catalyst exists, sets `anomalyStatus = 'legitimate_backlash'`, keeps human reviews open, and outputs `bannerExplanation` so other users see clear context on why negative reviews are spiking.
 
 ---
@@ -441,8 +442,8 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
 2. **`src/workers/evaluation-worker.ts`:**
    * Processes queued jobs:
      * **Bot Path:** Inserts record into `honeypot_vault`, sets `visibility = 'shadowbanned'`, and sends webhook to WordPress so WordPress also marks the comment `_shield_visibility = 'shadowbanned'`.
-     * **Human Path:** Runs `jev` -> `evaluateSemEvalBitmask()` -> optionally `gemini-4-hydrogen` -> sends webhook to WordPress with `failed_risk_ids`, `triggered_shield_ids`, and `deep_research_explanation` (`null` unless `gemini-4-hydrogen` ran).
-     * **Review Bombing Path:** Tracks rolling 1-hour and 6-hour human review ratings in Redis. If 1-star volume spikes `>= 3x` baseline with high rating divergence, runs `investigateReviewBombing()` via `gemini-4-hydrogen` and pushes `entity_banner` in the WordPress webhook.
+     * **Human Path:** Runs `jev` -> `evaluateSemEvalBitmask()` -> optionally `gpt-5-nano` -> sends webhook to WordPress with `failed_risk_ids`, `triggered_shield_ids`, and `deep_research_explanation` (`null` unless `gpt-5-nano` ran).
+     * **Review Bombing Path:** Tracks rolling 1-hour and 6-hour human review ratings in Redis. If 1-star volume spikes `>= 3x` baseline with high rating divergence, runs `investigateReviewBombing()` via `gpt-5-nano` and pushes `entity_banner` in the WordPress webhook.
 
 ---
 
@@ -470,9 +471,9 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
 **Objective:** Run automated assertions against the live stack.
 
 - **Test Case 1 (Headless Bot):** Submit comment with `webdriver: true` in telemetry token -> Expect `200 OK` response, comment stored in both WordPress (`shadowbanned`) and `honeypot_vault`, visible to the bot's session hash, hidden from public view.
-- **Test Case 2 (Angry Consumer Rant - Route 2):** Submit review triggering `Q1, Q2, Q4, Q7, Q9` + `Q50` -> Expect `jev` only (`gemini-4-hydrogen` not called), status `public`, `deep_research_explanation: null`.
-- **Test Case 3 (Coordinated Disinformation - Route 4):** Submit comment triggering `Q10, Q17, Q27, Q41` (14 pts, 0 shields) -> Expect escalation to `gemini-4-hydrogen`, status `public_flagged`, `failed_risk_ids: ["Q10","Q17","Q27","Q41"]`, and populated `deep_research_explanation`.
-- **Test Case 4 (Legitimate Review Bombing):** Submit burst of human 1-star reviews -> Expect `gemini-4-hydrogen` live web search check, human reviews remain open, and public explanation banner attached to the product page.
+- **Test Case 2 (Angry Consumer Rant - Route 2):** Submit review triggering `Q1, Q2, Q4, Q7, Q9` + `Q50` -> Expect `jev` only (`gpt-5-nano` not called), status `public`, `deep_research_explanation: null`.
+- **Test Case 3 (Coordinated Disinformation - Route 4):** Submit comment triggering `Q10, Q17, Q27, Q41` (14 pts, 0 shields) -> Expect escalation to `gpt-5-nano`, status `public_flagged`, `failed_risk_ids: ["Q10","Q17","Q27","Q41"]`, and populated `deep_research_explanation`.
+- **Test Case 4 (Legitimate Review Bombing):** Submit burst of human 1-star reviews -> Expect `gpt-5-nano` live web search check, human reviews remain open, and public explanation banner attached to the product page.
 
 # Questions one by one
 

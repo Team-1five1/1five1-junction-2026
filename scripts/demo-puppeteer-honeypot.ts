@@ -142,7 +142,7 @@ async function submitComment(page: Page, isWordPress: boolean, author: string, t
   const discoveredFields = await page.evaluate(() => {
     const form = document.querySelector("#commentform, form.comment-form");
     if (!form) return [];
-    const inputs = Array.from(form.querySelectorAll("input, textarea"));
+    const inputs = Array.from(form.querySelectorAll("input, textarea")) as HTMLElement[];
     return inputs.map((el) => {
       const style = window.getComputedStyle(el);
       const rect = el.getBoundingClientRect();
@@ -183,7 +183,7 @@ async function submitComment(page: Page, isWordPress: boolean, author: string, t
 
   const commentInput = await page.$("#comment");
   if (commentInput) {
-    await commentInput.click({ clickCount: 3 });
+    await commentInput.click({ count: 3 });
     await page.type("#comment", text, { delay: 30 });
   }
 
@@ -191,7 +191,7 @@ async function submitComment(page: Page, isWordPress: boolean, author: string, t
 
   const authorInput = await page.$("#author");
   if (authorInput) {
-    await authorInput.click({ clickCount: 3 });
+    await authorInput.click({ count: 3 });
     await page.type("#author", author, { delay: 55 });
   }
 
@@ -200,7 +200,7 @@ async function submitComment(page: Page, isWordPress: boolean, author: string, t
   if (isWordPress) {
     const emailInput = await page.$("#email");
     if (emailInput) {
-      await emailInput.click({ clickCount: 3 });
+      await emailInput.click({ count: 3 });
       await page.type("#email", `${author.toLowerCase().replace(/[^a-z0-9]/g, "")}@ai-agent.net`, { delay: 30 });
     }
   }

@@ -1,4 +1,30 @@
 services:
+  bun-app:
+    profiles: [backend]
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4000
+      DATABASE_URL: postgres://shield:shield_local_password@postgres:5432/shield_db
+      REDIS_URL: redis://redis:6379
+      WP_DEFAULT_WEBHOOK_URL: http://wordpress/wp-json/shield/v1/webhook
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "127.0.0.1:4000:4000"
+    volumes:
+      - ./keys:/app/keys
+    networks:
+      - app-net
+    healthcheck:
+      test: [CMD, bun, -e, "const r=await fetch('http://127.0.0.1:4000/api/ready');process.exit(r.ok?0:1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+
   postgres:
     image: pgvector/pgvector:pg16
     container_name: shield_pg
@@ -45,6 +71,8 @@ services:
     restart: unless-stopped
     depends_on:
       - wordpress-db
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8080:80"
     environment:

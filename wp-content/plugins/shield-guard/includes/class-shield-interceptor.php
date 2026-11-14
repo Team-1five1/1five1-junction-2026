@@ -16,6 +16,12 @@ class Shield_Interceptor {
     private function __construct() {
         add_action('init', array($this, 'ensure_author_session_cookie'));
         add_filter('pre_comment_approved', array($this, 'auto_approve_bot_illusion'), 99, 2);
+        add_action('shield_retry_ingest', array($this, 'dispatch_comment'));
+        add_action('pre_get_comments', function($query) {
+            if (is_admin() && current_user_can('moderate_comments')) return;
+            // WP caches IDs before comments_clauses runs. Partition that cache by viewer.
+            $query->query_vars['cache_domain'] = 'shield_' . $this->get_viewer_session_hash();
+        });
         add_action('wp_insert_comment', array($this, 'on_insert_comment'), 10, 2);
         add_filter('comments_clauses', array($this, 'filter_comments_clauses'), 10, 2);
         // Filter the displayed comment count so public visitors only see the count of visible comments,
@@ -43,7 +49,7 @@ class Shield_Interceptor {
      * Sets a persistent cookie, with deterministic IP + UserAgent SHA256 fallback for headless bots.
      */
     public function get_viewer_session_hash() {
-        if (!empty($_COOKIE['shield_author_session'])) {
+        if (!empty($_COOKIE['shield_author_session']) && preg_match('/^[a-f0-9]{64}$/', $_COOKIE['shield_author_session'])) {
             return sanitize_text_field($_COOKIE['shield_author_session']);
         }
 
@@ -58,7 +64,9 @@ class Shield_Interceptor {
 
     public function ensure_author_session_cookie() {
         if (empty($_COOKIE['shield_author_session']) && !headers_sent()) {
-            $this->get_viewer_session_hash();
+            $hash = hash('sha256', wp_generate_uuid4() . wp_salt('nonce'));
+            setcookie('shield_author_session', $hash, time() + (30 * 86400), COOKIEPATH ? COOKIEPATH : '/', COOKIE_DOMAIN, is_ssl(), true);
+            $_COOKIE['shield_author_session'] = $hash;
         }
     }
 
@@ -67,51 +75,28 @@ class Shield_Interceptor {
      * then fires non-blocking asynchronous POST to Bun API /v1/ingest.
      */
     public function on_insert_comment($comment_id, $comment_object) {
+        if ($comment_object->comment_type && !in_array($comment_object->comment_type, array('comment', 'review'), true)) return;
         $author_hash = $this->get_viewer_session_hash();
+        update_comment_meta($comment_id, '_shield_visitor_ip', $comment_object->comment_author_IP);
+        update_comment_meta($comment_id, '_shield_visitor_ua', $comment_object->comment_agent);
         update_comment_meta($comment_id, '_shield_author_hash', $author_hash);
+        update_comment_meta($comment_id, '_shield_visibility', 'pending');
+        // Replace WordPress's first-time-author hold after evaluation, while respecting
+        // an administrator's explicit "manually approve comments" setting.
+        if (strval($comment_object->comment_approved) === '0' && !get_option('comment_moderation')) {
+            update_comment_meta($comment_id, '_shield_auto_publish', '1');
+        }
 
         $telemetry_token = isset($_POST['_shield_token']) ? sanitize_text_field($_POST['_shield_token']) : '';
         $hp_val = isset($_POST['_shield_hp_field']) ? sanitize_text_field($_POST['_shield_hp_field']) : '';
         $ai_trap_val = isset($_POST['_shield_ai_trap']) ? sanitize_text_field($_POST['_shield_ai_trap']) : '';
         $rating = isset($_POST['rating']) ? intval($_POST['rating']) : null;
 
-        // Decode client telemetry payload (from collector.js + @fingerprintjs/botd)
-        $is_bot_detected = false;
-        if (!empty($hp_val) || !empty($ai_trap_val)) {
-            $is_bot_detected = true;
-        } elseif (!empty($telemetry_token)) {
-            $decoded_json = base64_decode($telemetry_token, true);
-            $telemetry = $decoded_json ? json_decode($decoded_json, true) : json_decode($telemetry_token, true);
-            if (is_array($telemetry)) {
-                if (!empty($telemetry['botdDetected']) || !empty($telemetry['webdriver']) || !empty($telemetry['honeypotTriggered']) || !empty($telemetry['aiTrapTriggered'])) {
-                    $is_bot_detected = true;
-                } elseif (isset($telemetry['formCompletionTimeMs']) && intval($telemetry['formCompletionTimeMs']) < 600) {
-                    $is_bot_detected = true;
-                } elseif (empty($telemetry['mouseEventsCount']) && empty($telemetry['touchEventsCount']) && empty($telemetry['keyCount'])) {
-                    $is_bot_detected = true;
-                }
-            }
-        }
-
-        if ($is_bot_detected) {
-            update_comment_meta($comment_id, '_shield_visibility', 'shadowbanned');
-        } else {
-            // Verified human visitor -> immediately public!
-            update_comment_meta($comment_id, '_shield_visibility', 'public');
-        }
-
         $post_id = $comment_object->comment_post_ID;
         $post = get_post($post_id);
         $entity_title = $post ? $post->post_title : 'Post #' . $post_id;
 
         $options = get_option('shield_guard_settings', array());
-        $configured_url = !empty($options['api_url']) ? rtrim($options['api_url'], '/') : 'http://host.docker.internal:4000';
-        // Inside Docker container, 127.0.0.1:4000 points to the WP container itself instead of the host Bun server
-        if (strpos($configured_url, '127.0.0.1:4000') !== false || strpos($configured_url, 'localhost:4000') !== false) {
-            $api_url = 'http://host.docker.internal:4000';
-        } else {
-            $api_url = $configured_url;
-        }
         $api_key = !empty($options['api_key']) ? $options['api_key'] : 'default_tenant';
         $mode = !empty($options['threshold_mode']) ? $options['threshold_mode'] : 'balanced';
 
@@ -132,39 +117,50 @@ class Shield_Interceptor {
             'thresholdMode'      => $mode,
         );
 
-        // Synchronous dispatch to Bun Hono ingestion endpoint so forensic badges & banners are ready before redirect
-        $response = wp_remote_post($api_url . '/v1/ingest?sync=true', array(
+        update_comment_meta($comment_id, '_shield_ingest_payload', wp_slash(wp_json_encode($payload)));
+        $this->dispatch_comment($comment_id);
+    }
+
+    public function dispatch_comment($comment_id) {
+        $payload_json = get_comment_meta($comment_id, '_shield_ingest_payload', true);
+        if (!$payload_json) return;
+        $options = get_option('shield_guard_settings', array());
+        $configured_url = !empty($options['api_url']) ? rtrim($options['api_url'], '/') : 'http://127.0.0.1:4000';
+        if (strpos($configured_url, '127.0.0.1:4000') !== false || strpos($configured_url, 'localhost:4000') !== false) {
+            $api_url = file_exists('/.dockerenv') ? 'http://host.docker.internal:4000' : $configured_url;
+        } else {
+            $api_url = $configured_url;
+        }
+        $api_key = isset($options['api_key']) ? $options['api_key'] : '';
+
+        // Ensure payload has the latest tenant key if options were updated since insert
+        $payload = json_decode($payload_json, true);
+        if (is_array($payload) && !empty($api_key) && (empty($payload['tenantApiKey']) || $payload['tenantApiKey'] !== $api_key)) {
+            $payload['tenantApiKey'] = $api_key;
+            $payload_json = wp_json_encode($payload);
+            update_comment_meta($comment_id, '_shield_ingest_payload', wp_slash($payload_json));
+        }
+
+        $response = wp_remote_post($api_url . '/v1/ingest', array(
             'method'      => 'POST',
-            'blocking'    => true,
-            'timeout'     => 6,
+            'blocking'    => true, // Wait for durable acceptance, never for AI analysis.
+            'timeout'     => 3,
             'headers'     => array(
                 'Content-Type' => 'application/json',
                 'X-Shield-Key' => $api_key,
+                'X-Shield-Visitor-IP' => get_comment_meta($comment_id, '_shield_visitor_ip', true),
+                'X-Shield-Visitor-UA' => get_comment_meta($comment_id, '_shield_visitor_ua', true),
             ),
-            'body'        => wp_json_encode($payload),
+            'body'        => $payload_json,
             'data_format' => 'body',
         ));
 
-        if (!is_wp_error($response) && wp_remote_retrieve_response_code($response) === 200) {
-            $res_data = json_decode(wp_remote_retrieve_body($response), true);
-            if (is_array($res_data) && !empty($res_data['visibility'])) {
-                update_comment_meta($comment_id, '_shield_visibility', sanitize_text_field($res_data['visibility']));
-                if (!empty($res_data['failedRiskIds']) && is_array($res_data['failedRiskIds'])) {
-                    update_comment_meta($comment_id, '_shield_failed_ids', wp_json_encode($res_data['failedRiskIds']));
-                }
-                if (isset($res_data['riskScore'])) {
-                    update_comment_meta($comment_id, '_shield_risk_score', intval($res_data['riskScore']));
-                }
-                if (!empty($res_data['modelUsed'])) {
-                    update_comment_meta($comment_id, '_shield_model_used', sanitize_text_field($res_data['modelUsed']));
-                }
-                if (!empty($res_data['deepResearchExplanation'])) {
-                    update_comment_meta($comment_id, '_shield_explanation', sanitize_textarea_field($res_data['deepResearchExplanation']));
-                }
-                if (!empty($res_data['banner']) && is_array($res_data['banner'])) {
-                    update_post_meta($post_id, '_shield_review_banner', wp_slash(wp_json_encode($res_data['banner'])));
-                }
-            }
+        if (!is_wp_error($response) && (wp_remote_retrieve_response_code($response) === 202 || wp_remote_retrieve_response_code($response) === 200)) {
+            delete_comment_meta($comment_id, '_shield_ingest_payload');
+            delete_comment_meta($comment_id, '_shield_visitor_ip');
+            delete_comment_meta($comment_id, '_shield_visitor_ua');
+        } elseif (!wp_next_scheduled('shield_retry_ingest', array(intval($comment_id)))) {
+            wp_schedule_single_event(time() + 60, 'shield_retry_ingest', array(intval($comment_id)));
         }
     }
 
@@ -175,7 +171,7 @@ class Shield_Interceptor {
      * Bots always see their own shadowbanned content!
      */
     public function filter_comments_clauses($clauses, $query) {
-        if (is_admin()) {
+        if (is_admin() && current_user_can('moderate_comments')) {
             return $clauses;
         }
 
@@ -184,6 +180,13 @@ class Shield_Interceptor {
 
         $clauses['join'] .= " LEFT JOIN {$wpdb->commentmeta} AS shield_vis ON {$wpdb->comments}.comment_ID = shield_vis.comment_id AND shield_vis.meta_key = '_shield_visibility'";
         $clauses['join'] .= " LEFT JOIN {$wpdb->commentmeta} AS shield_hash ON {$wpdb->comments}.comment_ID = shield_hash.comment_id AND shield_hash.meta_key = '_shield_author_hash'";
+
+        // The native approval predicate must also allow this author's own held submissions.
+        $clauses['where'] = preg_replace(
+            "/(?:[a-zA-Z0-9_]+\\.)?comment_approved\\s*=\\s*'1'/",
+            "({$wpdb->comments}.comment_approved = '1' OR ({$wpdb->comments}.comment_approved = '0' AND shield_hash.meta_value = '{$viewer_hash}'))",
+            $clauses['where']
+        );
 
         // Allow:
         // 1. Unmanaged/legacy comments (shield_vis.meta_value IS NULL)

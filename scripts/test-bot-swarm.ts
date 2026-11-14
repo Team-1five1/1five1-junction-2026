@@ -201,7 +201,7 @@ async function createRequester(baseUrl: string) {
     if (useRemoteHttp) {
       const res = await fetch(`${baseUrl}${path}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Shield-Key": "default_tenant" },
         body: JSON.stringify(payload),
       });
       const data = await res.json();
@@ -210,7 +210,7 @@ async function createRequester(baseUrl: string) {
       const res = await appObj.fetch(
         new Request(`http://localhost:4000${path}`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-Shield-Key": "default_tenant" },
           body: JSON.stringify(payload),
         })
       );
