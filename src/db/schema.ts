@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, integer, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, timestamp, jsonb, doublePrecision } from "drizzle-orm/pg-core";
 
 export const tenants = pgTable("tenants", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -24,6 +24,13 @@ export const submissions = pgTable("submissions", {
   failedRiskIds: jsonb("failed_risk_ids").$type<string[]>().default([]).notNull(),
   triggeredShieldIds: jsonb("triggered_shield_ids").$type<string[]>().default([]).notNull(),
   deepResearchExplanation: text("deep_research_explanation"), // null unless gemini-4-hydrogen is triggered
+  originCountryCode: text("origin_country_code"),
+  originCountry: text("origin_country"),
+  originRegion: text("origin_region"),
+  originCity: text("origin_city"),
+  originLat: doublePrecision("origin_lat"),
+  originLng: doublePrecision("origin_lng"),
+  originNetwork: text("origin_network"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

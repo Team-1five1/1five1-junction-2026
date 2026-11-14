@@ -1,14 +1,71 @@
 import { Queue, Worker, type Job } from "bullmq";
 import Redis from "ioredis";
 import { createHmac } from "crypto";
-import { db } from "../db";
+import { db, sql } from "../db";
 import { submissions, honeypotVault, entityBanners, tenants } from "../db/schema";
 import { eq } from "drizzle-orm";
 import { screenWithJev } from "../ai/jev-screener";
 import { evaluateSemEvalBitmask, type ThresholdMode } from "../engines/semeval-scorer";
 import { verifyStanceOrForensic, investigateReviewBombing } from "../ai/hydrogen-research";
+import { computeLocalEmbedding, toPgVectorLiteral } from "../ai/embeddings";
+import { resolveOriginGeo, type OriginGeoInfo } from "../engines/geo-intel";
 import type { BotEvaluationResult } from "../engines/bot-telemetry";
 import { debugLog, debugDecision } from "../config/logger";
+
+export interface InMemorySubmissionRecord {
+  id: string;
+  wpCommentId: number;
+  entityId: string;
+  authorSessionHash: string;
+  rawText: string;
+  rating: number | null;
+  authorType: "human" | "bot";
+  visibility: "pending" | "public" | "public_flagged" | "shadowbanned";
+  routingPath: string;
+  modelUsed: string;
+  riskScore: number;
+  shieldFlags: number;
+  failedRiskIds: string[];
+  triggeredShieldIds: string[];
+  deepResearchExplanation: string | null;
+  origin?: OriginGeoInfo;
+  createdAt: Date;
+  embedding: number[];
+}
+
+export interface InMemoryHoneypotRecord {
+  id: string;
+  submissionId: string;
+  ipAddress: string;
+  userAgent: string;
+  telemetryJson: Record<string, any>;
+  patternClusterId: string | null;
+  createdAt: Date;
+}
+
+export const inMemorySubmissions: InMemorySubmissionRecord[] = [];
+export const inMemoryHoneypot = new Map<string, InMemoryHoneypotRecord>();
+export let activeThresholdMode: ThresholdMode = "balanced";
+export function setActiveThresholdMode(mode: ThresholdMode) {
+  activeThresholdMode = mode;
+}
+
+let originColsChecked = false;
+async function ensureOriginColumnsOnce(): Promise<void> {
+  if (originColsChecked) return;
+  originColsChecked = true;
+  try {
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_country_code text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_country text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_region text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_city text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_lat double precision`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_lng double precision`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_network text`;
+  } catch {
+    // Postgres might be unreachable in unit tests / offline mode
+  }
+}
 
 export interface EvaluationJobData {
   wpCommentId: number;
@@ -124,7 +181,7 @@ export async function processEvaluationJob(data: EvaluationJobData) {
     ipAddress,
     userAgent,
     wpWebhookUrl = process.env.WP_DEFAULT_WEBHOOK_URL || "http://127.0.0.1:8080/wp-json/shield/v1/webhook",
-    thresholdMode = "balanced",
+    thresholdMode = activeThresholdMode,
   } = data;
 
   debugLog("Worker", `Starting evaluation for comment #${wpCommentId} on ${entityId}`, {
@@ -142,7 +199,28 @@ export async function processEvaluationJob(data: EvaluationJobData) {
     });
 
     let subId = crypto.randomUUID();
+    const now = new Date();
+    const embedding = computeLocalEmbedding(rawText, []);
+    const origin = resolveOriginGeo({
+      ipAddress,
+      authorSessionHash,
+      wpCommentId,
+      authorType: "bot",
+    });
+    const clusterId = botResult.reasons.some((r) => r.includes("honeypot"))
+      ? "cluster_honeypot_trap"
+      : botResult.reasons.some((r) => r.includes("webdriver"))
+        ? "cluster_headless_webdriver"
+        : "cluster_headless_generic";
+
+    const telemetryPayload = {
+      ...botResult.telemetry,
+      confidenceScore: botResult.confidenceScore,
+      reasons: botResult.reasons,
+    };
+
     try {
+      await ensureOriginColumnsOnce();
       const [sub] = await db
         .insert(submissions)
         .values({
@@ -160,25 +238,65 @@ export async function processEvaluationJob(data: EvaluationJobData) {
           failedRiskIds: [],
           triggeredShieldIds: [],
           deepResearchExplanation: null,
+          originCountryCode: origin.countryCode,
+          originCountry: origin.countryName,
+          originRegion: origin.region,
+          originCity: origin.city,
+          originLat: origin.lat,
+          originLng: origin.lng,
+          originNetwork: origin.networkType,
         })
         .returning();
       if (sub) subId = sub.id;
+
+      try {
+        const vecLit = toPgVectorLiteral(embedding);
+        await sql`UPDATE submissions SET embedding = ${vecLit}::vector WHERE id = ${subId}`;
+      } catch {
+        // embedding vector column may not exist yet before migration
+      }
 
       await db.insert(honeypotVault).values({
         submissionId: subId,
         ipAddress,
         userAgent,
-        telemetryJson: {
-          ...botResult.telemetry,
-          confidenceScore: botResult.confidenceScore,
-          reasons: botResult.reasons,
-        },
-        patternClusterId: "cluster_headless_generic",
+        telemetryJson: telemetryPayload,
+        patternClusterId: clusterId,
       });
       debugLog("Worker", `Honeypot vault entry recorded for comment #${wpCommentId}`);
     } catch (dbErr: any) {
       console.warn(`DB insert failed for bot submission: ${dbErr.message}`);
     }
+
+    inMemorySubmissions.unshift({
+      id: subId,
+      wpCommentId,
+      entityId,
+      authorSessionHash,
+      rawText,
+      rating: rating ?? null,
+      authorType: "bot",
+      visibility: "shadowbanned",
+      routingPath: "BOT_HONEYPOT",
+      modelUsed: "none",
+      riskScore: 100,
+      shieldFlags: 0,
+      failedRiskIds: [],
+      triggeredShieldIds: [],
+      deepResearchExplanation: null,
+      origin,
+      createdAt: now,
+      embedding,
+    });
+    inMemoryHoneypot.set(subId, {
+      id: crypto.randomUUID(),
+      submissionId: subId,
+      ipAddress,
+      userAgent,
+      telemetryJson: telemetryPayload,
+      patternClusterId: clusterId,
+      createdAt: now,
+    });
 
     // Notify WordPress to mark comment shadowbanned
     await sendWordPressWebhook(wpWebhookUrl, {
@@ -261,27 +379,81 @@ export async function processEvaluationJob(data: EvaluationJobData) {
   }
 
   // Save submission to PostgreSQL
+  let humanSubId = crypto.randomUUID();
+  const humanNow = new Date();
+  const humanEmbedding = computeLocalEmbedding(rawText, [
+    ...scoreRes.failedRiskIds,
+    ...scoreRes.triggeredShieldIds,
+  ]);
+  const humanOrigin = resolveOriginGeo({
+    ipAddress,
+    authorSessionHash,
+    wpCommentId,
+    authorType: "human",
+  });
+
   try {
-    await db.insert(submissions).values({
-      wpCommentId,
-      entityId,
-      authorSessionHash,
-      rawText,
-      rating: rating ?? null,
-      authorType: "human",
-      visibility,
-      routingPath: scoreRes.route,
-      modelUsed,
-      riskScore: scoreRes.riskScore,
-      shieldFlags: scoreRes.shieldFlags,
-      failedRiskIds: scoreRes.failedRiskIds,
-      triggeredShieldIds: scoreRes.triggeredShieldIds,
-      deepResearchExplanation: explanation,
-    });
+    await ensureOriginColumnsOnce();
+    const [inserted] = await db
+      .insert(submissions)
+      .values({
+        wpCommentId,
+        entityId,
+        authorSessionHash,
+        rawText,
+        rating: rating ?? null,
+        authorType: "human",
+        visibility,
+        routingPath: scoreRes.route,
+        modelUsed,
+        riskScore: scoreRes.riskScore,
+        shieldFlags: scoreRes.shieldFlags,
+        failedRiskIds: scoreRes.failedRiskIds,
+        triggeredShieldIds: scoreRes.triggeredShieldIds,
+        deepResearchExplanation: explanation,
+        originCountryCode: humanOrigin.countryCode,
+        originCountry: humanOrigin.countryName,
+        originRegion: humanOrigin.region,
+        originCity: humanOrigin.city,
+        originLat: humanOrigin.lat,
+        originLng: humanOrigin.lng,
+        originNetwork: humanOrigin.networkType,
+      })
+      .returning();
+    if (inserted) humanSubId = inserted.id;
+
+    try {
+      const vecLit = toPgVectorLiteral(humanEmbedding);
+      await sql`UPDATE submissions SET embedding = ${vecLit}::vector WHERE id = ${humanSubId}`;
+    } catch {
+      // embedding vector column may not exist yet before migration
+    }
+
     debugLog("Worker", `Recorded submission #${wpCommentId} to database (visibility: ${visibility})`);
   } catch (dbErr: any) {
     console.warn(`DB insert failed for human submission: ${dbErr.message}`);
   }
+
+  inMemorySubmissions.unshift({
+    id: humanSubId,
+    wpCommentId,
+    entityId,
+    authorSessionHash,
+    rawText,
+    rating: rating ?? null,
+    authorType: "human",
+    visibility,
+    routingPath: scoreRes.route,
+    modelUsed,
+    riskScore: scoreRes.riskScore,
+    shieldFlags: scoreRes.shieldFlags,
+    failedRiskIds: scoreRes.failedRiskIds,
+    triggeredShieldIds: scoreRes.triggeredShieldIds,
+    deepResearchExplanation: explanation,
+    origin: humanOrigin,
+    createdAt: humanNow,
+    embedding: humanEmbedding,
+  });
 
   // Review Bombing Velocity Tracker for ratings
   let bannerPayload: { anomalyStatus: string; bannerExplanation: string | null } | null = null;
