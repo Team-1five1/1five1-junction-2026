@@ -506,13 +506,16 @@ export async function ensureDashboardSchema(): Promise<{
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         api_key text NOT NULL UNIQUE,
         wp_webhook_url text NOT NULL,
+        webhook_secret text,
         threshold_mode text NOT NULL DEFAULT 'balanced',
         created_at timestamp NOT NULL DEFAULT now()
       );
     `;
+    await sql`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS webhook_secret text`;
     await sql`
       CREATE TABLE IF NOT EXISTS submissions (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id text,
         wp_comment_id integer NOT NULL,
         entity_id text NOT NULL,
         author_session_hash text NOT NULL,
@@ -527,6 +530,7 @@ export async function ensureDashboardSchema(): Promise<{
         failed_risk_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
         triggered_shield_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
         deep_research_explanation text,
+        research_evidence jsonb,
         origin_country_code text,
         origin_country text,
         origin_region text,
@@ -537,6 +541,8 @@ export async function ensureDashboardSchema(): Promise<{
         created_at timestamp NOT NULL DEFAULT now()
       );
     `;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS tenant_id text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS research_evidence jsonb`;
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_country_code text`;
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_country text`;
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_region text`;
@@ -544,6 +550,8 @@ export async function ensureDashboardSchema(): Promise<{
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_lat double precision`;
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_lng double precision`;
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_network text`;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS submissions_tenant_comment_idx ON submissions (tenant_id, wp_comment_id)`;
+    await sql`CREATE INDEX IF NOT EXISTS submissions_velocity_idx ON submissions (tenant_id, entity_id, created_at)`;
     await sql`
       CREATE TABLE IF NOT EXISTS honeypot_vault (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -557,12 +565,19 @@ export async function ensureDashboardSchema(): Promise<{
     `;
     await sql`
       CREATE TABLE IF NOT EXISTS entity_banners (
-        entity_id text PRIMARY KEY,
+        tenant_id text NOT NULL DEFAULT 'legacy',
+        entity_id text NOT NULL,
         anomaly_status text NOT NULL DEFAULT 'normal',
         banner_explanation text,
-        updated_at timestamp NOT NULL DEFAULT now()
+        sources jsonb NOT NULL DEFAULT '[]'::jsonb,
+        updated_at timestamp NOT NULL DEFAULT now(),
+        PRIMARY KEY (tenant_id, entity_id)
       );
     `;
+    await sql`ALTER TABLE entity_banners ADD COLUMN IF NOT EXISTS tenant_id text NOT NULL DEFAULT 'legacy'`;
+    await sql`ALTER TABLE entity_banners ADD COLUMN IF NOT EXISTS sources jsonb NOT NULL DEFAULT '[]'`;
+    await sql`ALTER TABLE entity_banners DROP CONSTRAINT IF EXISTS entity_banners_pkey`;
+    await sql`ALTER TABLE entity_banners ADD PRIMARY KEY (tenant_id, entity_id)`;
 
     if (pgvectorAvailable) {
       await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS embedding vector(64)`;
@@ -753,13 +768,14 @@ export async function seedDemoData(force = false): Promise<{ seededCount: number
         await db
           .insert(entityBanners)
           .values({
+            tenantId: "legacy",
             entityId: b.entityId,
             anomalyStatus: b.anomalyStatus,
             bannerExplanation: b.bannerExplanation,
             updatedAt: new Date(),
           })
           .onConflictDoUpdate({
-            target: entityBanners.entityId,
+            target: [entityBanners.tenantId, entityBanners.entityId],
             set: {
               anomalyStatus: b.anomalyStatus,
               bannerExplanation: b.bannerExplanation,
@@ -864,6 +880,7 @@ export async function clearDemoData(clearAll = false): Promise<{
   let memDeleted = 0;
   for (let i = inMemorySubmissions.length - 1; i >= 0; i--) {
     const sub = inMemorySubmissions[i];
+    if (!sub) continue;
     if (clearAll || sub.authorSessionHash.startsWith(SEED_HASH_PREFIX)) {
       inMemoryHoneypot.delete(sub.id);
       inMemorySubmissions.splice(i, 1);

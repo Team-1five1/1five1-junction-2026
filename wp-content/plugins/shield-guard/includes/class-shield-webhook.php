@@ -37,11 +37,6 @@ class Shield_Webhook {
             $sig_header = $request->get_header('X-Shield-Signature');
         }
 
-        // Allow dev bypass if secret is default or placeholder
-        if ($secret === 'shield_shared_secret' || $secret === 'replace_with_shared_wp_hmac_secret') {
-            return true;
-        }
-
         if (empty($sig_header) || !str_starts_with($sig_header, 'sha256=')) {
             return false;
         }
@@ -52,6 +47,16 @@ class Shield_Webhook {
 
     public function handle_webhook($request) {
         $params = $request->get_json_params();
+        if (!empty($params['eventType']) && $params['eventType'] === 'entity_banner') {
+            $post_id = isset($params['entityId']) ? intval($params['entityId']) : 0;
+            if (!$post_id || !get_post($post_id) || !isset($params['banner']['anomalyStatus']) || !in_array($params['banner']['anomalyStatus'], array('normal', 'legitimate_backlash', 'coordinated_attack'), true)) {
+                return new WP_Error('invalid_banner', 'Invalid entity banner', array('status' => 400));
+            }
+            $banner = $params['banner'];
+            $banner['updatedAt'] = gmdate('c');
+            update_post_meta($post_id, '_shield_review_banner', wp_slash(wp_json_encode($banner)));
+            return rest_ensure_response(array('status' => 'success'));
+        }
         if (empty($params) || empty($params['wpCommentId'])) {
             return new WP_Error('missing_params', 'wpCommentId is required', array('status' => 400));
         }
@@ -63,11 +68,26 @@ class Shield_Webhook {
         $risk_score = isset($params['riskScore']) ? intval($params['riskScore']) : 0;
         $model_used = !empty($params['modelUsed']) ? sanitize_text_field($params['modelUsed']) : '';
 
+        $comment = get_comment($comment_id);
+        if (!$comment || strval($comment->comment_post_ID) !== strval($params['entityId'] ?? '') || !in_array($visibility, array('public', 'public_flagged', 'shadowbanned'), true)) {
+            return new WP_Error('invalid_verdict', 'Comment, entity or visibility mismatch', array('status' => 400));
+        }
         // Update comment meta
         update_comment_meta($comment_id, '_shield_visibility', $visibility);
         update_comment_meta($comment_id, '_shield_failed_ids', wp_json_encode($failed_ids));
         update_comment_meta($comment_id, '_shield_risk_score', $risk_score);
+        if (!empty($params['researchEvidence']) && is_array($params['researchEvidence'])) {
+            update_comment_meta($comment_id, '_shield_research_evidence', wp_slash(wp_json_encode($params['researchEvidence'])));
+        } else {
+            delete_comment_meta($comment_id, '_shield_research_evidence');
+        }
+        if ($visibility !== 'shadowbanned' && strval($comment->comment_approved) === '0' && get_comment_meta($comment_id, '_shield_auto_publish', true) === '1' && !get_option('comment_moderation')) {
+            wp_set_comment_status($comment_id, 'approve');
+            delete_comment_meta($comment_id, '_shield_auto_publish');
+        }
 
+        update_comment_meta($comment_id, '_shield_shield_ids', wp_json_encode(isset($params['triggeredShieldIds']) ? $params['triggeredShieldIds'] : array()));
+        clean_comment_cache($comment_id);
         if (!empty($model_used)) {
             update_comment_meta($comment_id, '_shield_model_used', $model_used);
         } else {

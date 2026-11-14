@@ -370,7 +370,7 @@ export function resolveOriginGeo(params: {
 
   // 1. Explicit country header (e.g., Cloudflare CF-IPCountry)
   if (upperCountry && upperCountry in COUNTRY_CODE_TO_HUB) {
-    const hub = GEO_HUBS[COUNTRY_CODE_TO_HUB[upperCountry]!];
+    const hub = GEO_HUBS[COUNTRY_CODE_TO_HUB[upperCountry]!]!;
     return {
       countryCode: hub.countryCode,
       countryName: hub.countryName,
@@ -389,7 +389,7 @@ export function resolveOriginGeo(params: {
   if (cleanIp && cleanIp !== "127.0.0.1" && cleanIp !== "unknown") {
     const matched = IP_PREFIX_MAP.find((m) => cleanIp.startsWith(m.prefix));
     if (matched) {
-      const hub = GEO_HUBS[matched.hubKey];
+      const hub = GEO_HUBS[matched.hubKey]!;
       return {
         countryCode: hub.countryCode,
         countryName: hub.countryName,
@@ -407,8 +407,8 @@ export function resolveOriginGeo(params: {
 
   // 3. Match known session hashes
   if (cleanHash && cleanHash in HASH_ORIGIN_MAP) {
-    const spec = HASH_ORIGIN_MAP[cleanHash];
-    const hub = GEO_HUBS[spec.hubKey];
+    const spec = HASH_ORIGIN_MAP[cleanHash]!;
+    const hub = GEO_HUBS[spec.hubKey]!;
     return {
       countryCode: hub.countryCode,
       countryName: hub.countryName,
@@ -429,8 +429,8 @@ export function resolveOriginGeo(params: {
       ? (["RU_MSK", "DE_FRA", "NL_AMS", "RO_BUH", "CN_SZX", "BR_GRU"] as const)
       : (["RU_LED", "IR_THR", "US_IAD", "GB_LON", "FI_HEL", "SG_SIN"] as const);
   const seedKey = `${cleanIp}|${cleanHash}|${params.wpCommentId || 0}`;
-  const chosenKey = hubKeys[stableHash(seedKey) % hubKeys.length];
-  const hub = GEO_HUBS[chosenKey];
+  const chosenKey = hubKeys[stableHash(seedKey) % hubKeys.length]!;
+  const hub = GEO_HUBS[chosenKey]!;
 
   return {
     countryCode: hub.countryCode,

@@ -22,7 +22,7 @@ export interface SemEvalResult {
     | "ROUTE_2_SHIELDED_CLEAR"
     | "ROUTE_3_STANCE_VERIFICATION"
     | "ROUTE_4_FORENSIC_THREAT";
-  escalateToHydrogen: boolean;
+  escalateToResearch: boolean;
 }
 
 const BUCKET_MAP: Record<number, number[]> = {
@@ -46,7 +46,7 @@ const MODE_THRESHOLDS: Record<ThresholdMode, { base: number; shielded: number }>
 
 export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
   const activeNums = new Set(
-    input.triggeredIds.map((id) => parseInt(id.replace("Q", ""), 10))
+    input.triggeredIds.filter(id => /^Q([1-9]|[1-4][0-9]|50)$/.test(id)).map((id) => Number(id.slice(1)))
   );
 
   const failedRiskIds: QuestionId[] = [];
@@ -64,7 +64,7 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
 
       for (const [bId, qList] of Object.entries(BUCKET_MAP)) {
         if (qList.includes(qNum)) {
-          bucketPoints[Number(bId)] += pts;
+          bucketPoints[Number(bId)] = (bucketPoints[Number(bId)] ?? 0) + pts;
           break;
         }
       }
@@ -78,7 +78,7 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
   const activeRiskBuckets = activeBuckets.length;
 
   let bucket1CapApplied = false;
-  if (activeRiskBuckets === 1 && bucketPoints[1] > 3) {
+  if (activeRiskBuckets === 1 && (bucketPoints[1] ?? 0) > 3) {
     bucketPoints[1] = 3;
     bucket1CapApplied = true;
   }
@@ -133,7 +133,7 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
       failedRiskIds,
       triggeredShieldIds,
       route: "ROUTE_4_FORENSIC_THREAT",
-      escalateToHydrogen: true,
+      escalateToResearch: true,
     };
   } else if (riskScore >= shieldedThreshold && shieldFlags >= 2) {
     result = {
@@ -146,7 +146,7 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
       failedRiskIds,
       triggeredShieldIds,
       route: "ROUTE_3_STANCE_VERIFICATION",
-      escalateToHydrogen: true,
+      escalateToResearch: true,
     };
   } else if (
     (riskScore >= baseThreshold && shieldFlags === 0) ||
@@ -162,7 +162,7 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
       failedRiskIds,
       triggeredShieldIds,
       route: "ROUTE_4_FORENSIC_THREAT",
-      escalateToHydrogen: true,
+      escalateToResearch: true,
     };
   } else if (riskScore >= 5 && shieldFlags >= 1) {
     result = {
@@ -175,7 +175,7 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
       failedRiskIds,
       triggeredShieldIds,
       route: "ROUTE_2_SHIELDED_CLEAR",
-      escalateToHydrogen: false,
+      escalateToResearch: false,
     };
   } else {
     result = {
@@ -188,12 +188,12 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
       failedRiskIds,
       triggeredShieldIds,
       route: "ROUTE_1_FAST_CLEAR",
-      escalateToHydrogen: false,
+      escalateToResearch: false,
     };
   }
 
   debugDecision("SemEvalScorer", result.route, {
-    escalateToHydrogen: result.escalateToHydrogen,
+    escalateToResearch: result.escalateToResearch,
     riskScore: result.riskScore,
     shieldFlags: result.shieldFlags,
     override: result.overrideTriggered || "none",

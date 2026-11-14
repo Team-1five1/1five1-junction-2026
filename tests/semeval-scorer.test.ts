@@ -8,7 +8,7 @@ describe("SemEval Scorer Engine", () => {
       mode: "balanced",
     });
     expect(result.route).toBe("ROUTE_1_FAST_CLEAR");
-    expect(result.escalateToHydrogen).toBe(false);
+    expect(result.escalateToResearch).toBe(false);
     expect(result.riskScore).toBe(1);
     expect(result.shieldFlags).toBe(0);
   });
@@ -23,7 +23,7 @@ describe("SemEval Scorer Engine", () => {
       mode: "balanced",
     });
     expect(result.route).toBe("ROUTE_2_SHIELDED_CLEAR");
-    expect(result.escalateToHydrogen).toBe(false);
+    expect(result.escalateToResearch).toBe(false);
     expect(result.shieldFlags).toBe(1);
     expect(result.riskScore).toBe(6);
   });
@@ -36,7 +36,7 @@ describe("SemEval Scorer Engine", () => {
       mode: "balanced",
     });
     expect(result.route).toBe("ROUTE_4_FORENSIC_THREAT");
-    expect(result.escalateToHydrogen).toBe(true);
+    expect(result.escalateToResearch).toBe(true);
     expect(result.overrideTriggered).toBe("DOUBLE_RED_FLAG");
     expect(result.synergyBonusApplied).toBe(true); // buckets 2, 4, 6 active (3 buckets) -> +2
   });
@@ -63,7 +63,7 @@ describe("SemEval Scorer Engine", () => {
       mode: "balanced",
     });
     expect(result.route).toBe("ROUTE_3_STANCE_VERIFICATION");
-    expect(result.escalateToHydrogen).toBe(true);
+    expect(result.escalateToResearch).toBe(true);
     expect(result.shieldFlags).toBe(2);
   });
 

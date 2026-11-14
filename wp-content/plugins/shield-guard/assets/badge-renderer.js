@@ -1,5 +1,5 @@
 /**
- * Shield Guard Badge Renderer
+ * Verius Badge Renderer
  * Translates compact SemEval Question IDs (Q1-Q44) into clean UI badges on the frontend.
  * Renders expandable Deep Research Explanation card and Review Bombing Notice banners.
  */
@@ -63,12 +63,12 @@
     if (isVisible) {
       card.classList.remove('visible');
       card.style.display = 'none';
-      btn.textContent = '🛡️ View Forensic AI Research Grounding';
+      btn.textContent = '🛡️ View Fact Check and Context';
       btn.setAttribute('aria-expanded', 'false');
     } else {
       card.classList.add('visible');
       card.style.display = 'block';
-      btn.textContent = '▲ Hide Forensic AI Research';
+      btn.textContent = '▲ Hide Fact Check and Context';
       btn.setAttribute('aria-expanded', 'true');
     }
   }

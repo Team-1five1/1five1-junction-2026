@@ -1,15 +1,17 @@
-import { pgTable, uuid, text, integer, timestamp, jsonb, doublePrecision } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, timestamp, jsonb, doublePrecision, uniqueIndex, primaryKey } from "drizzle-orm/pg-core";
 
 export const tenants = pgTable("tenants", {
   id: uuid("id").defaultRandom().primaryKey(),
   apiKey: text("api_key").notNull().unique(),
   wpWebhookUrl: text("wp_webhook_url").notNull(),
+  webhookSecret: text("webhook_secret"),
   thresholdMode: text("threshold_mode").default("balanced").notNull(), // 'strict' | 'balanced' | 'high_precision'
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
 export const submissions = pgTable("submissions", {
   id: uuid("id").defaultRandom().primaryKey(),
+  tenantId: text("tenant_id"),
   wpCommentId: integer("wp_comment_id").notNull(),
   entityId: text("entity_id").notNull(), // WP post_id or WooCommerce product_id
   authorSessionHash: text("author_session_hash").notNull(),
@@ -18,12 +20,13 @@ export const submissions = pgTable("submissions", {
   authorType: text("author_type").notNull(), // 'human' | 'bot'
   visibility: text("visibility").notNull(), // 'pending' | 'public' | 'public_flagged' | 'shadowbanned'
   routingPath: text("routing_path").notNull(),
-  modelUsed: text("model_used").notNull(), // 'none' | 'jev' | 'gemini-4-hydrogen'
+  modelUsed: text("model_used").notNull(), // Configured model ID, or none for bot-only evaluation
   riskScore: integer("risk_score").default(0).notNull(),
   shieldFlags: integer("shield_flags").default(0).notNull(),
   failedRiskIds: jsonb("failed_risk_ids").$type<string[]>().default([]).notNull(),
   triggeredShieldIds: jsonb("triggered_shield_ids").$type<string[]>().default([]).notNull(),
-  deepResearchExplanation: text("deep_research_explanation"), // null unless gemini-4-hydrogen is triggered
+  deepResearchExplanation: text("deep_research_explanation"), // Generated only by a successfully grounded research model
+  researchEvidence: jsonb("research_evidence").$type<Record<string, unknown>>(),
   originCountryCode: text("origin_country_code"),
   originCountry: text("origin_country"),
   originRegion: text("origin_region"),
@@ -32,7 +35,7 @@ export const submissions = pgTable("submissions", {
   originLng: doublePrecision("origin_lng"),
   originNetwork: text("origin_network"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [uniqueIndex("submissions_tenant_comment_idx").on(table.tenantId, table.wpCommentId)]);
 
 export const honeypotVault = pgTable("honeypot_vault", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -45,8 +48,27 @@ export const honeypotVault = pgTable("honeypot_vault", {
 });
 
 export const entityBanners = pgTable("entity_banners", {
-  entityId: text("entity_id").primaryKey(),
+  tenantId: text("tenant_id").default("legacy").notNull(),
+  entityId: text("entity_id").notNull(),
   anomalyStatus: text("anomaly_status").default("normal").notNull(), // 'normal' | 'legitimate_backlash' | 'coordinated_attack'
   bannerExplanation: text("banner_explanation"),
+  sources: jsonb("sources").$type<Array<{title: string; url: string}>>().default([]).notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [primaryKey({ columns: [table.tenantId, table.entityId] })]);
+
+// Durable ingestion outbox. Redis may be unavailable without losing accepted submissions.
+export const evaluationJobs = pgTable("evaluation_jobs", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  queueName: text("queue_name").default("shield-evaluation-v2").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  wpCommentId: integer("wp_comment_id").notNull(),
+  data: jsonb("data").notNull(),
+  result: jsonb("result").$type<Record<string, any>>(),
+  deliveredAt: timestamp("delivered_at"),
+  contextCompletedAt: timestamp("context_completed_at"),
+  failureCount: integer("failure_count").default(0).notNull(),
+  nextAttemptAt: timestamp("next_attempt_at"),
+  retryPausedAt: timestamp("retry_paused_at"),
+  lastError: jsonb("last_error").$type<{ message: string; reason: string; status?: number }>(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, table => [uniqueIndex("evaluation_jobs_tenant_comment_idx").on(table.tenantId, table.wpCommentId)]);

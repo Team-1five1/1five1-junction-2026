@@ -28,22 +28,35 @@ class Shield_Renderer {
             'shield-styles',
             plugins_url('assets/shield.css', dirname(__FILE__)),
             array(),
-            '1.0.3'
+            SHIELD_GUARD_VERSION
         );
 
         wp_enqueue_script(
             'shield-collector',
             plugins_url('assets/collector.js', dirname(__FILE__)),
             array(),
-            '1.0.3',
+            SHIELD_GUARD_VERSION,
             true
         );
+
+        $key = get_transient('shield_telemetry_public_key');
+        if (!$key) {
+            $options = get_option('shield_guard_settings', array());
+            $url = !empty($options['api_url']) ? rtrim($options['api_url'], '/') : 'http://127.0.0.1:4000';
+            $response = wp_remote_get($url . '/v1/telemetry/key', array('timeout' => 2, 'headers' => array('X-Shield-Key' => $options['api_key'] ?? '')));
+            if (!is_wp_error($response) && wp_remote_retrieve_response_code($response) === 200) {
+                $body = json_decode(wp_remote_retrieve_body($response), true);
+                $key = $body['publicKey'] ?? '';
+                if ($key) set_transient('shield_telemetry_public_key', $key, HOUR_IN_SECONDS);
+            }
+        }
+        wp_add_inline_script('shield-collector', 'window.shieldMetricsConfig=' . wp_json_encode(array('publicKey' => $key ?: '')) . ';', 'before');
 
         wp_enqueue_script(
             'shield-badges',
             plugins_url('assets/badge-renderer.js', dirname(__FILE__)),
             array(),
-            '1.0.3',
+            SHIELD_GUARD_VERSION,
             true
         );
     }
@@ -85,16 +98,21 @@ class Shield_Renderer {
         $failed_ids_json = get_comment_meta($comment->comment_ID, '_shield_failed_ids', true);
         $explanation = get_comment_meta($comment->comment_ID, '_shield_explanation', true);
         $model_used = get_comment_meta($comment->comment_ID, '_shield_model_used', true);
+        $evidence = json_decode(get_comment_meta($comment->comment_ID, '_shield_research_evidence', true), true);
+        $unverified = ($evidence['researchStatus'] ?? '') === 'unverified';
+        $incorrect = false;
+        foreach (($evidence['claimChecks'] ?? array()) as $check) {
+            if (in_array($check['status'] ?? '', array('incorrect', 'misleading'), true)) $incorrect = true;
+            if (($check['status'] ?? '') === 'unsubstantiated') $unverified = true;
+        }
 
-        // When harder thinking model was set on the review, return clear-text explanation in place of generic description
-        // Fallback to generic message when jev is used only (or when explanation is empty)
-        $is_harder_model = (!empty($model_used) && $model_used !== 'jev' && $model_used !== 'none') || (!empty($explanation) && empty($model_used));
-        $generic_desc = 'This comment was flagged for manipulative patterns or coordinated messaging. Specific detected markers are shown below.';
-        $banner_desc = ($is_harder_model && !empty($explanation)) ? esc_html($explanation) : $generic_desc;
+        $generic_desc = 'This comment was flagged for potentially misleading statements or manipulative patterns. The assessment is shown below.';
+        $banner_desc = !empty($explanation) ? nl2br(esc_html($explanation)) : $generic_desc;
+        $banner_title = $incorrect ? 'Incorrect or Misleading Factual Claims' : ($unverified ? 'Potentially Misleading: Unsubstantiated Claims' : 'Community Context Notice: Flagged Content');
 
         // Prepend comment-level context warning banner with clear-text or fallback description
         $output = '<div class="shield-comment-banner">' .
-            '<div class="shield-comment-banner-badge">⚠️ Community Context Notice: Flagged Content</div>' .
+            '<div class="shield-comment-banner-badge">⚠️ ' . esc_html($banner_title) . '</div>' .
             '<div class="shield-comment-banner-desc">' . $banner_desc . '</div>' .
         '</div>' . $comment_text;
 
@@ -106,13 +124,20 @@ class Shield_Renderer {
 
         // Forensic AI Research Grounding Card & Toggle
         if (!empty($explanation)) {
-            $escaped_explanation = esc_html($explanation);
-            $model_label = !empty($model_used) ? esc_html($model_used) : 'gemini-4-hydrogen';
+            $escaped_explanation = nl2br(esc_html($explanation));
+            $model_label = !empty($model_used) ? esc_html($model_used) : 'Research model';
+            $sources_html = '';
+            foreach (($evidence['sources'] ?? array()) as $source) {
+                if (!empty($source['url']) && preg_match('#^https?://#', $source['url'])) {
+                    $sources_html .= '<li><a href="' . esc_url($source['url']) . '" target="_blank" rel="noopener noreferrer">' . esc_html($source['title'] ?? $source['url']) . '</a></li>';
+                }
+            }
+            if ($sources_html) $sources_html = '<ul class="shield-context-sources">' . $sources_html . '</ul>';
             $output .= '<div class="shield-explanation-wrapper">' .
-                '<button type="button" class="shield-explanation-toggle" aria-expanded="false">🛡️ View Forensic AI Research Grounding</button>' .
+                '<button type="button" class="shield-explanation-toggle" aria-expanded="false">🛡️ View Fact Check and Context</button>' .
                 '<div class="shield-explanation-card" style="display:none;">' .
-                    '<div class="shield-explanation-header"><strong>Forensic Model Grounding (' . $model_label . '):</strong></div>' .
-                    '<p class="shield-explanation-body">' . $escaped_explanation . '</p>' .
+                    '<div class="shield-explanation-header"><strong>Fact Check and Context (' . $model_label . '):</strong></div>' .
+                    '<p class="shield-explanation-body">' . $escaped_explanation . '</p>' . $sources_html .
                 '</div>' .
             '</div>';
         }
@@ -149,7 +174,9 @@ class Shield_Renderer {
             }
         }
 
-        if (!$banner || empty($banner['bannerExplanation'])) {
+        // Legacy banners were inferred without search evidence. Render only fresh, sourced context.
+        if (empty($banner['updatedAt']) || empty($banner['sources']) || strtotime($banner['updatedAt']) < time() - 6 * HOUR_IN_SECONDS) return '';
+        if (!$banner || ($banner['anomalyStatus'] ?? 'normal') === 'normal' || empty($banner['bannerExplanation'])) {
             return '';
         }
 
@@ -160,12 +187,19 @@ class Shield_Renderer {
             ? 'Coordinated Activity Notice Under Investigation'
             : 'Public Review Volume Notice';
 
+        $sources_html = '';
+        foreach (($banner['sources'] ?? array()) as $source) {
+            if (!empty($source['url']) && preg_match('#^https?://#', $source['url'])) {
+                $sources_html .= '<li><a href="' . esc_url($source['url']) . '" rel="noopener noreferrer" target="_blank">' . esc_html($source['title'] ?? $source['url']) . '</a></li>';
+            }
+        }
+        if ($sources_html) $sources_html = '<ul class="shield-context-sources">' . $sources_html . '</ul>';
         return "
         <div class=\"shield-review-banner {$status}\">
             <div class=\"shield-review-banner-icon\">{$icon}</div>
             <div>
                 <div class=\"shield-review-banner-title\">{$title}</div>
-                <div class=\"shield-review-banner-text\">{$text}</div>
+                <div class=\"shield-review-banner-text\">{$text}</div>{$sources_html}
             </div>
         </div>";
     }

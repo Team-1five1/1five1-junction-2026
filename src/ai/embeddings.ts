@@ -49,7 +49,7 @@ function fnv1aHash(str: string, seed = 2166136261): number {
 export function normalizeVector(vec: number[]): number[] {
   let normSq = 0;
   for (let i = 0; i < vec.length; i++) {
-    normSq += vec[i] * vec[i];
+    normSq += vec[i]! * vec[i]!;
   }
   const norm = Math.sqrt(normSq);
   if (norm < 1e-9) {
@@ -74,7 +74,7 @@ export function computeLocalEmbedding(
 
   // 1. Dimensions 0..15: Semantic topic lexicon activations
   for (let i = 0; i < TOPIC_LEXICONS.length; i++) {
-    const matches = clean.match(new RegExp(TOPIC_LEXICONS[i].source, "gi"));
+    const matches = clean.match(new RegExp(TOPIC_LEXICONS[i]!.source, "gi"));
     if (matches && matches.length > 0) {
       vec[i] = Math.min(1.5, 0.65 + matches.length * 0.25);
     }
@@ -85,7 +85,7 @@ export function computeLocalEmbedding(
     const q = SEMEVAL_QUESTIONS[qId as `Q${number}`];
     if (q) {
       const bucketIdx = 15 + Math.min(7, Math.max(1, q.bucket)); // 16..22
-      vec[bucketIdx] += (q.pointsOrFlags || 1) * 0.35;
+      vec[bucketIdx] = (vec[bucketIdx] ?? 0) + (q.pointsOrFlags || 1) * 0.35;
     }
   }
 
@@ -112,15 +112,15 @@ export function computeLocalEmbedding(
   const lshSpan = EMBEDDING_DIM - 28; // 36 dimensions
 
   for (let i = 0; i < words.length; i++) {
-    const w = words[i];
+    const w = words[i]!;
     const h1 = fnv1aHash(w, 2166136261);
     const h2 = fnv1aHash(w, 374761393);
     const idx1 = 28 + (h1 % lshSpan);
     const idx2 = 28 + (h2 % lshSpan);
     const sign1 = (h1 & 1) === 0 ? 1 : -1;
     const sign2 = (h2 & 1) === 0 ? 1 : -1;
-    vec[idx1] += sign1 * 0.45;
-    vec[idx2] += sign2 * 0.3;
+    vec[idx1] = (vec[idx1] ?? 0) + sign1 * 0.45;
+    vec[idx2] = (vec[idx2] ?? 0) + sign2 * 0.3;
 
     // Word bigram
     if (i + 1 < words.length) {
@@ -128,7 +128,7 @@ export function computeLocalEmbedding(
       const hb = fnv1aHash(bg, 668265263);
       const idxB = 28 + (hb % lshSpan);
       const signB = (hb & 1) === 0 ? 1 : -1;
-      vec[idxB] += signB * 0.55;
+      vec[idxB] = (vec[idxB] ?? 0) + signB * 0.55;
     }
 
     // Character 3-grams for fuzzy/typo resilience
@@ -138,7 +138,7 @@ export function computeLocalEmbedding(
         const hc = fnv1aHash(tri, 1442695041);
         const idxC = 28 + (hc % lshSpan);
         const signC = (hc & 1) === 0 ? 1 : -1;
-        vec[idxC] += signC * 0.12;
+        vec[idxC] = (vec[idxC] ?? 0) + signC * 0.12;
       }
     }
   }
@@ -159,9 +159,9 @@ export function cosineSimilarity(a: number[], b: number[]): number {
   let normA = 0;
   let normB = 0;
   for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
+    dot += a[i]! * b[i]!;
+    normA += a[i]! * a[i]!;
+    normB += b[i]! * b[i]!;
   }
   const denom = Math.sqrt(normA) * Math.sqrt(normB);
   if (denom < 1e-9) return 0;
