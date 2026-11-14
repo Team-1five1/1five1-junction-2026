@@ -1,4 +1,30 @@
 services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: shield_pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: shield
+      POSTGRES_PASSWORD: shield_local_password
+      POSTGRES_DB: shield_db
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - app-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: shield_redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    networks:
+      - app-net
+
   wordpress-db:
     image: mariadb:11
     container_name: wordpress-db
@@ -28,66 +54,7 @@ services:
       WORDPRESS_DB_NAME: wordpress
     volumes:
       - wp_data:/var/www/html
-    networks:
-      - app-net
-
-  git-sync:
-    image: alpine/git:latest
-    container_name: git-auto-sync
-    restart: unless-stopped
-    volumes:
-      - app_code:/app
-    working_dir: /app
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        if [ ! -d "/app/.git" ]; then
-          echo "[git-sync] Initializing repository clone..."
-          git clone https://github.com/Team-1five1/1five1-junction-2026.git /app
-        fi
-        cd /app
-        echo "[git-sync] Monitoring origin/main every 15s..."
-        while true; do
-          git fetch origin main --quiet 2>/dev/null || true
-          LOCAL=$$(git rev-parse HEAD 2>/dev/null || echo "")
-          REMOTE=$$(git rev-parse origin/main 2>/dev/null || echo "")
-          if [ -n "$$LOCAL" ] && [ -n "$$REMOTE" ] && [ "$$LOCAL" != "$$REMOTE" ]; then
-            echo "[git-sync] Changes detected ($$LOCAL -> $$REMOTE). Pulling..."
-            git pull origin main
-            echo "[git-sync] Successfully updated to $$REMOTE"
-          fi
-          sleep 15
-        done
-    networks:
-      - app-net
-
-  bun-app:
-    image: oven/bun:latest
-    container_name: bun-app
-    restart: unless-stopped
-    depends_on:
-      - git-sync
-    working_dir: /app
-    ports:
-      - "3000:3000"
-    environment:
-      - PORT=3000
-      - NODE_ENV=production
-    volumes:
-      - app_code:/app
-    command:
-      - /bin/sh
-      - -c
-      - |
-        echo "[bun-app] Waiting for git-sync to prepare codebase..."
-        until [ -f /app/src/index.ts ]; do
-          sleep 1
-        done
-        echo "[bun-app] Installing dependencies..."
-        bun install
-        echo "[bun-app] Starting Bun service in watch mode..."
-        exec bun run --watch src/index.ts
+      - ./wp-content/plugins/shield-guard:/var/www/html/wp-content/plugins/shield-guard
     networks:
       - app-net
 
@@ -96,6 +63,7 @@ networks:
     driver: bridge
 
 volumes:
+  pgdata:
+  redisdata:
   db_data:
   wp_data:
-  app_code:
