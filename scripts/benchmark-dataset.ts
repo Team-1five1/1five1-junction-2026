@@ -273,7 +273,7 @@ async function runBenchmark() {
 
   const datasetDir = getArg("--dataset-dir", "/Users/andwspb/Downloads/datasets");
   const limit = parseInt(getArg("--limit", "50"), 10);
-  const mode = (getArg("--mode", "balanced") as "strict" | "balanced" | "high_precision");
+  const mode = (getArg("--mode", "strict") as "strict" | "balanced" | "high_precision");
   const techniqueFilter = getArg("--technique", "");
   const isDryRun = args.includes("--dry-run");
   const stage1Only = args.includes("--stage1-only");
@@ -345,7 +345,7 @@ async function runBenchmark() {
         finalModel = forensicRes.modelUsed;
         explanation = forensicRes.deepResearchExplanation;
 
-        if (!forensicRes.flagged) {
+        if (!forensicRes.flagged && scoreRes.riskScore < 10) {
           predictedPropaganda = false;
           finalRoute = "ROUTE_2_SHIELDED_CLEAR";
         } else {
@@ -432,7 +432,7 @@ async function runBenchmark() {
   console.log(`  🎯 F1-Score:            ${f1.toFixed(1)}%`);
   console.log(`  🎯 Overall Accuracy:    ${accuracy.toFixed(1)}%`);
   console.log(`  ⚡ Avg Latency:         ${avgLatency} ms / sample`);
-  console.log("=====================================================================\n");
+  console.log("=====================================================================");
 
   // Technique-by-technique recall breakdown
   const techniqueStats: Record<string, { total: number; caught: number }> = {};
@@ -444,7 +444,7 @@ async function runBenchmark() {
     if (r.predictedPropaganda) techniqueStats[tech]!.caught++;
   }
 
-  console.log("📊 TECHNIQUE-BY-TECHNIQUE RECALL BREAKDOWN:");
+  console.log("\n📊 TECHNIQUE-BY-TECHNIQUE RECALL BREAKDOWN:");
   console.log("---------------------------------------------------------------------");
   console.log(`Technique                           Samples   Caught      Recall`);
   console.log("---------------------------------------------------------------------");

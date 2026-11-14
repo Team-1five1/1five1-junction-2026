@@ -14,7 +14,7 @@ export interface SemEvalResult {
   activeRiskBuckets: number;
   synergyBonusApplied: boolean;
   bucket1CapApplied: boolean;
-  overrideTriggered: "DOUBLE_RED_FLAG" | "HARD_EVIDENCE_VETO" | null;
+  overrideTriggered: "DOUBLE_RED_FLAG" | "HARD_EVIDENCE_VETO" | "TIER_3_ESCALATION" | "GATEKEEPER_ESCALATION" | null;
   failedRiskIds: QuestionId[];
   triggeredShieldIds: QuestionId[];
   route:
@@ -37,12 +37,6 @@ const BUCKET_MAP: Record<number, number[]> = {
 const TIER_3_QUESTIONS = new Set([8, 10, 16, 17, 18, 19, 25, 26, 27, 37, 38, 41, 44]);
 const TIER_1_QUESTIONS = new Set([1, 2, 3, 4, 5, 6, 7, 39, 40, 42, 43]);
 const DOUBLE_WEIGHT_SHIELDS = new Set([46, 47, 49]);
-
-const MODE_THRESHOLDS: Record<ThresholdMode, { base: number; shielded: number }> = {
-  strict: { base: 5, shielded: 7 },
-  balanced: { base: 7, shielded: 10 },
-  high_precision: { base: 10, shielded: 13 },
-};
 
 export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
   const activeNums = new Set(
@@ -90,18 +84,63 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
     riskScore += 2;
   }
 
-  let { base: baseThreshold, shielded: shieldedThreshold } = MODE_THRESHOLDS[input.mode];
   let overrideTriggered: SemEvalResult["overrideTriggered"] = null;
 
-  if (activeNums.has(48) && activeNums.has(49)) {
+  if (activeNums.has(48) && activeNums.has(49) && tier3Count === 0) {
     overrideTriggered = "HARD_EVIDENCE_VETO";
-    baseThreshold = Math.max(baseThreshold, 12);
-    shieldedThreshold = Math.max(shieldedThreshold, 12);
   }
 
   const doubleRedFlag = tier3Count >= 2 && shieldFlags === 0 && riskScore >= 6;
   if (doubleRedFlag) {
     overrideTriggered = "DOUBLE_RED_FLAG";
+  } else if (tier3Count >= 1 && !overrideTriggered) {
+    overrideTriggered = "TIER_3_ESCALATION";
+  }
+
+  // ---------------------------------------------------------------------------
+  // High-Confidence Gatekeeper Routing:
+  // - Everyday Personal Venting (Q50) with zero Tier-3 manipulation clears locally
+  // - Hard Evidence Veto (Q48+Q49) with moderate risk (<10) clears locally
+  // - Severe manipulation (tier3Count >= 1) ALWAYS escalates to Stage 2
+  // - Risk present: escalates to Stage 2 (Haiku)
+  //   - If shields present: ROUTE_3_STANCE_VERIFICATION
+  //   - If no shields: ROUTE_4_FORENSIC_THREAT
+  // - Zero risk (failedRiskIds == 0): clears locally without API cost
+  // ---------------------------------------------------------------------------
+  let route: SemEvalResult["route"];
+  let escalateToResearch: boolean;
+
+  if (doubleRedFlag) {
+    route = "ROUTE_4_FORENSIC_THREAT";
+    escalateToResearch = true;
+  } else if (overrideTriggered === "HARD_EVIDENCE_VETO" && riskScore < 10) {
+    route = "ROUTE_2_SHIELDED_CLEAR";
+    escalateToResearch = false;
+  } else if (activeNums.has(50) && tier3Count === 0 && activeRiskBuckets <= 2) {
+    // Everyday consumer venting (Q50) with no severe manipulation clears locally
+    route = "ROUTE_2_SHIELDED_CLEAR";
+    escalateToResearch = false;
+  } else if (tier3Count >= 1) {
+    // Tier-3 severe manipulation must always escalate to Stage 2
+    escalateToResearch = true;
+    route = shieldFlags > 0 ? "ROUTE_3_STANCE_VERIFICATION" : "ROUTE_4_FORENSIC_THREAT";
+  } else if (failedRiskIds.length > 0) {
+    if (input.mode === "balanced" && activeRiskBuckets === 1 && (bucketPoints[1] ?? 0) > 0 && riskScore <= 3 && shieldFlags === 0) {
+      // Mild emotional language in balanced mode clears locally
+      route = "ROUTE_1_FAST_CLEAR";
+      escalateToResearch = false;
+    } else {
+      escalateToResearch = true;
+      route = shieldFlags > 0 ? "ROUTE_3_STANCE_VERIFICATION" : "ROUTE_4_FORENSIC_THREAT";
+    }
+  } else if (shieldFlags > 0) {
+    // Zero risk, only shields triggered -> clean
+    route = "ROUTE_2_SHIELDED_CLEAR";
+    escalateToResearch = false;
+  } else {
+    // Zero risk, zero shields -> fast clean
+    route = "ROUTE_1_FAST_CLEAR";
+    escalateToResearch = false;
   }
 
   debugLog("SemEvalScorer", "Evaluating SemEval Bitmask", {
@@ -115,89 +154,28 @@ export function evaluateSemEvalBitmask(input: SemEvalInput): SemEvalResult {
     bucket1CapApplied,
     synergyBonusApplied,
     riskScore,
-    baseThreshold,
-    shieldedThreshold,
     overrideTriggered,
+    route,
+    escalateToResearch,
   });
 
-  let result: SemEvalResult;
-
-  if (doubleRedFlag) {
-    result = {
-      riskScore,
-      shieldFlags,
-      activeRiskBuckets,
-      synergyBonusApplied,
-      bucket1CapApplied,
-      overrideTriggered,
-      failedRiskIds,
-      triggeredShieldIds,
-      route: "ROUTE_4_FORENSIC_THREAT",
-      escalateToResearch: true,
-    };
-  } else if (riskScore >= shieldedThreshold && shieldFlags >= 2) {
-    result = {
-      riskScore,
-      shieldFlags,
-      activeRiskBuckets,
-      synergyBonusApplied,
-      bucket1CapApplied,
-      overrideTriggered,
-      failedRiskIds,
-      triggeredShieldIds,
-      route: "ROUTE_3_STANCE_VERIFICATION",
-      escalateToResearch: true,
-    };
-  } else if (
-    (riskScore >= baseThreshold && shieldFlags === 0) ||
-    (riskScore >= shieldedThreshold && shieldFlags <= 1)
-  ) {
-    result = {
-      riskScore,
-      shieldFlags,
-      activeRiskBuckets,
-      synergyBonusApplied,
-      bucket1CapApplied,
-      overrideTriggered,
-      failedRiskIds,
-      triggeredShieldIds,
-      route: "ROUTE_4_FORENSIC_THREAT",
-      escalateToResearch: true,
-    };
-  } else if (riskScore >= 5 && shieldFlags >= 1) {
-    result = {
-      riskScore,
-      shieldFlags,
-      activeRiskBuckets,
-      synergyBonusApplied,
-      bucket1CapApplied,
-      overrideTriggered,
-      failedRiskIds,
-      triggeredShieldIds,
-      route: "ROUTE_2_SHIELDED_CLEAR",
-      escalateToResearch: false,
-    };
-  } else {
-    result = {
-      riskScore,
-      shieldFlags,
-      activeRiskBuckets,
-      synergyBonusApplied,
-      bucket1CapApplied,
-      overrideTriggered,
-      failedRiskIds,
-      triggeredShieldIds,
-      route: "ROUTE_1_FAST_CLEAR",
-      escalateToResearch: false,
-    };
-  }
-
-  debugDecision("SemEvalScorer", result.route, {
-    escalateToResearch: result.escalateToResearch,
-    riskScore: result.riskScore,
-    shieldFlags: result.shieldFlags,
-    override: result.overrideTriggered || "none",
+  debugDecision("SemEvalScorer", route, {
+    escalateToResearch,
+    riskScore,
+    shieldFlags,
+    override: overrideTriggered || "none",
   });
 
-  return result;
+  return {
+    riskScore,
+    shieldFlags,
+    activeRiskBuckets,
+    synergyBonusApplied,
+    bucket1CapApplied,
+    overrideTriggered,
+    failedRiskIds,
+    triggeredShieldIds,
+    route,
+    escalateToResearch,
+  };
 }
