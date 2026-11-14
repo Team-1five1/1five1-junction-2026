@@ -5,7 +5,9 @@
   "private": true,
   "scripts": {
     "start": "bun run src/index.ts",
-    "dev": "bun run --watch src/index.ts"
+    "dev": "bun run --watch src/index.ts",
+    "test": "bun test",
+    "benchmark": "bun run scripts/benchmark-dataset.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

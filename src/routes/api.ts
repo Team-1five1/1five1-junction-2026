@@ -53,68 +53,112 @@ apiRouter.post("/v1/ingest", async (c) => {
     return c.json({ error: "Invalid payload", details: parsed.error.issues }, 400);
   }
 
-  const data = parsed.data;
-  const ip = c.req.header("x-forwarded-for") || c.req.header("cf-connecting-ip") || "127.0.0.1";
-  const userAgent = c.req.header("user-agent") || "unknown";
+  const {
+    wpCommentId,
+    entityId,
+    entityTitle,
+    authorSessionHash,
+    rawText,
+    rating,
+    telemetryToken,
+    honeypotValue,
+    tenantApiKey,
+    wpWebhookUrl,
+    thresholdMode = "balanced",
+  } = parsed.data;
 
-  debugLog("API", `Received POST /v1/ingest for comment #${data.wpCommentId}`, {
-    entityId: data.entityId,
-    rating: data.rating,
-    ip,
-    userAgent,
-    hasTelemetry: !!data.telemetryToken,
-    hasHoneypot: !!data.honeypotValue,
+  debugLog("API", `Received POST /v1/ingest for comment #${wpCommentId}`, {
+    entityId,
+    ip: c.req.header("x-forwarded-for") || "127.0.0.1",
+    userAgent: c.req.header("user-agent") || "unknown",
+    hasTelemetry: !!telemetryToken,
+    hasHoneypot: !!honeypotValue,
   });
 
-  // Fast synchronous telemetry evaluation (<2ms)
-  const botResult = evaluateBotTelemetry(data.telemetryToken || {}, data.honeypotValue);
+  // 1. Synchronous Bot Telemetry & Honeypot Engine (<2ms)
+  const botResult = evaluateBotTelemetry(
+    telemetryToken || null,
+    honeypotValue || null
+  );
 
-  const jobData = {
-    wpCommentId: data.wpCommentId,
-    entityId: data.entityId,
-    entityTitle: data.entityTitle,
-    authorSessionHash: data.authorSessionHash,
-    rawText: data.rawText,
-    rating: data.rating,
-    botResult,
-    ipAddress: ip,
-    userAgent,
-    tenantApiKey: data.tenantApiKey,
-    wpWebhookUrl: data.wpWebhookUrl,
-    thresholdMode: data.thresholdMode,
-  };
+  // Synchronous processing request (?sync=true) used for testing & fast path
+  const isSync = c.req.query("sync") === "true";
 
-  const queue = getEvaluationQueue();
-  const runSync = c.req.query("sync") === "true";
-
-  if (runSync || !queue) {
-    debugLog("API", `Processing comment #${data.wpCommentId} synchronously`);
-    const result = await processEvaluationJob(jobData);
-    return c.json({ status: "processed", ...result }, 200);
-  }
-
-  try {
-    await queue.add("evaluate", jobData, {
-      removeOnComplete: true,
-      removeOnFail: false,
+  if (isSync) {
+    debugLog("API", `Processing comment #${wpCommentId} synchronously`);
+    const result = await processEvaluationJob({
+      wpCommentId,
+      entityId,
+      entityTitle,
+      authorSessionHash,
+      rawText,
+      rating,
+      botResult,
+      ipAddress: c.req.header("x-forwarded-for") || "127.0.0.1",
+      userAgent: c.req.header("user-agent") || "unknown",
+      wpWebhookUrl,
+      thresholdMode,
     });
-    debugLog("API", `Comment #${data.wpCommentId} enqueued to BullMQ (isBot: ${botResult.isBot})`);
-    return c.json({
-      status: "accepted",
-      isBot: botResult.isBot,
-      wpCommentId: data.wpCommentId,
-      jobQueued: true,
-    }, 202);
-  } catch (err: any) {
-    console.warn(`Queue add failed (${err.message}), processing inline`);
-    const result = await processEvaluationJob(jobData);
-    return c.json({ status: "processed_inline", ...result }, 200);
+    return c.json(result);
   }
+
+  // 2. Headless bots detected immediately are shadowbanned synchronously
+  if (botResult.isBot) {
+    // Dispatch to background queue for recording honeypot vault & audit logs
+    const queue = getEvaluationQueue();
+    await queue.add("evaluate-comment", {
+      wpCommentId,
+      entityId,
+      entityTitle,
+      authorSessionHash,
+      rawText,
+      rating,
+      botResult,
+      ipAddress: c.req.header("x-forwarded-for") || "127.0.0.1",
+      userAgent: c.req.header("user-agent") || "unknown",
+      wpWebhookUrl,
+      thresholdMode,
+    });
+
+    return c.json({
+      status: "processed",
+      wpCommentId,
+      authorType: "bot",
+      visibility: "shadowbanned",
+      hasBanner: false,
+      banner: null,
+    });
+  }
+
+  // 3. Human submissions are enqueued to BullMQ worker (<5ms response time)
+  const queue = getEvaluationQueue();
+  await queue.add("evaluate-comment", {
+    wpCommentId,
+    entityId,
+    entityTitle,
+    authorSessionHash,
+    rawText,
+    rating,
+    botResult,
+    ipAddress: c.req.header("x-forwarded-for") || "127.0.0.1",
+    userAgent: c.req.header("user-agent") || "unknown",
+    wpWebhookUrl,
+    thresholdMode,
+  });
+
+  return c.json({
+    status: "queued",
+    wpCommentId,
+    authorType: "human",
+    visibility: "pending",
+    hasBanner: false,
+    banner: null,
+  });
 });
 
 /**
  * POST /v1/analyze
- * Direct on-demand propaganda detection endpoint.
+ * Direct standalone text evaluation pipeline for testing & real-time checking.
  */
 apiRouter.post("/v1/analyze", async (c) => {
   let body: any;
@@ -136,21 +180,21 @@ apiRouter.post("/v1/analyze", async (c) => {
     textPreview: text.length > 80 ? text.substring(0, 80) + "..." : text,
   });
 
-  // Stage 1: Fast Screener
-  const jevRes = await screenWithJev(text);
+  // Stage 1: Fast Screener Jev
+  const jevResult = await screenWithJev(text);
 
-  // Deterministic 50-Question Scorer
+  // SemEval Deterministic Scorer
   const scoreRes = evaluateSemEvalBitmask({
-    triggeredIds: jevRes.triggeredIds,
+    triggeredIds: jevResult.triggeredIds,
     mode,
   });
 
-  let deepResearchExplanation: string | null = null;
-  let modelUsed = "jev";
+  let explanation: string | null = null;
+  let modelUsed = jevResult.modelUsed;
 
+  // Stage 2: Heavy Forensic & Stance Grounding (gemini-4-hydrogen)
   if (scoreRes.escalateToHydrogen) {
-    modelUsed = "gemini-4-hydrogen";
-    const forensicRes = await verifyStanceOrForensic(
+    const heavyResult = await verifyStanceOrForensic(
       text,
       scoreRes.route === "ROUTE_3_STANCE_VERIFICATION"
         ? "ROUTE_3_STANCE_VERIFICATION"
@@ -158,11 +202,13 @@ apiRouter.post("/v1/analyze", async (c) => {
       scoreRes.failedRiskIds
     );
 
-    if (scoreRes.route === "ROUTE_3_STANCE_VERIFICATION" && !forensicRes.endorsed) {
-      deepResearchExplanation = null;
+    if (scoreRes.route === "ROUTE_3_STANCE_VERIFICATION" && !heavyResult.endorsed) {
+      explanation = null;
+      scoreRes.route = "ROUTE_2_SHIELDED_CLEAR";
     } else {
-      deepResearchExplanation = forensicRes.deepResearchExplanation;
+      explanation = heavyResult.deepResearchExplanation;
     }
+    modelUsed = heavyResult.modelUsed;
   }
 
   debugDecision("API", `/v1/analyze completed with route ${scoreRes.route}`, {
@@ -171,26 +217,24 @@ apiRouter.post("/v1/analyze", async (c) => {
     riskScore: scoreRes.riskScore,
     shieldFlags: scoreRes.shieldFlags,
     failedRiskIds: scoreRes.failedRiskIds,
-    hasExplanation: !!deepResearchExplanation,
+    hasExplanation: !!explanation,
   });
 
   return c.json({
+    route: scoreRes.route,
     risk_score: scoreRes.riskScore,
     shield_flags: scoreRes.shieldFlags,
-    route: scoreRes.route,
-    model_used: modelUsed,
     failed_risk_ids: scoreRes.failedRiskIds,
     triggered_shield_ids: scoreRes.triggeredShieldIds,
-    synergy_bonus_applied: scoreRes.synergyBonusApplied,
-    bucket1_cap_applied: scoreRes.bucket1CapApplied,
-    override_triggered: scoreRes.overrideTriggered,
-    deep_research_explanation: deepResearchExplanation,
+    escalate_to_hydrogen: scoreRes.escalateToHydrogen,
+    deep_research_explanation: explanation,
+    model_used: modelUsed,
   });
 });
 
 /**
  * PATCH /v1/tenant/mode
- * Updates threshold mode for a tenant.
+ * Admin toggle for changing the tenant's threshold sensitivity mode.
  */
 apiRouter.patch("/v1/tenant/mode", async (c) => {
   let body: any;
@@ -227,13 +271,9 @@ apiRouter.patch("/v1/tenant/mode", async (c) => {
   }
 });
 
-/**
- * GET /v1/entity/:id/banner
- * Retrieves entity banner status.
- */
-apiRouter.get("/v1/entity/:id/banner", async (c) => {
+async function handleGetBanner(c: any) {
   const entityId = c.req.param("id");
-  debugLog("API", `GET /v1/entity/${entityId}/banner requested`);
+  debugLog("API", `Banner requested for entity: ${entityId}`);
 
   try {
     const [banner] = await db
@@ -256,4 +296,11 @@ apiRouter.get("/v1/entity/:id/banner", async (c) => {
   }
 
   return c.json({ entityId, anomalyStatus: "normal", bannerExplanation: null });
-});
+}
+
+/**
+ * GET /v1/entity/:id/banner and GET /v1/banner/:id
+ * Retrieves entity banner status.
+ */
+apiRouter.get("/v1/entity/:id/banner", handleGetBanner);
+apiRouter.get("/v1/banner/:id", handleGetBanner);

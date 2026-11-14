@@ -37,9 +37,9 @@ export async function verifyStanceOrForensic(
 
   const prompt = route === "ROUTE_3_STANCE_VERIFICATION"
     ? `The following text contains flagged risk patterns (${failedRiskIds.join(", ")}), but also potential benign shields (e.g. quoting, debunking, satire).
-Analyze if the author endorses and actively promotes the manipulation (endorsed: true) or is merely reporting, quoting, or debunking it without endorsement (endorsed: false).
-If endorsed: false, return "endorsed": false and "explanation": null.
-If endorsed: true, return "endorsed": true and provide a concise, neutral 2-3 sentence forensic explanation of the manipulation.
+Analyze if the author endorses and actively promotes the manipulation or rhetoric (endorsed: true) or is merely reporting, quoting, or debunking it without endorsement (endorsed: false).
+If endorsed: false, return {"endorsed": false, "explanation": null}.
+If endorsed: true, return {"endorsed": true, "explanation": "..."}. Provide a concise, neutral 1-2 sentence forensic explanation of the manipulation.
 
 Flagged Criteria:
 ${questionDetails}
@@ -48,18 +48,20 @@ User Text:
 """${text}"""
 
 Return strictly JSON: {"endorsed": boolean, "explanation": string | null}`
-    : `The following text was flagged for high forensic propaganda risk (${failedRiskIds.join(", ")}).
-Provide a concise, neutral 1-2 sentence forensic explanation explaining why this content constitutes coordinated manipulation, stereotyping, or disinformation, citing specific patterns.
+    : `The following text was flagged by a gatekeeper screener for: ${failedRiskIds.join(", ")}.
 
 Flagged Criteria:
 ${questionDetails}
 
+Task:
+Determine if the text actually employs loaded language, emotional exaggeration, slogans, rhetorical attacks, alarmism, or persuasive framing:
+- Return {"endorsed": true, "explanation": "string"} if the text uses emotionally charged wording, moral condemnation, slogans, or persuasive steering. Provide a concise, neutral 1-2 sentence forensic explanation.
+- Return {"endorsed": false, "explanation": null} if the text is a neutral factual statement, benign context, or non-persuasive journalistic reporting.
+
 User Text:
 """${text}"""
 
-Return strictly JSON: {"endorsed": true, "explanation": string}.
-
-Do not return criteria codes in your response message.`;
+Return strictly JSON: {"endorsed": boolean, "explanation": string | null}. Do not return criteria codes in your response message.`;
 
   if (!apiKey || apiKey === "replace_with_hostinger_ai_router_key") {
     return fallbackStanceOrForensic(text, route, failedRiskIds, model);
@@ -75,7 +77,7 @@ Do not return criteria codes in your response message.`;
       body: JSON.stringify({
         model,
         messages: [{ role: "user", content: prompt }],
-        temperature: 0.2,
+        temperature: 0.1,
         response_format: { type: "json_object" },
       }),
     });
@@ -91,14 +93,14 @@ Do not return criteria codes in your response message.`;
     const parsed = JSON.parse(cleaned);
 
     const result: ForensicResult = {
-      endorsed: parsed.endorsed ?? true,
+      endorsed: Boolean(parsed.endorsed),
       deepResearchExplanation: parsed.explanation ?? null,
       modelUsed: model,
     };
 
-    debugDecision("HydrogenResearch", route === "ROUTE_3_STANCE_VERIFICATION"
-      ? (result.endorsed ? "STANCE_ENDORSED_AS_MANIPULATION" : "STANCE_CLEARED_BENIGN")
-      : "FORENSIC_EXPLANATION_GENERATED", {
+    debugDecision("HydrogenResearch", result.endorsed
+      ? (route === "ROUTE_3_STANCE_VERIFICATION" ? "STANCE_ENDORSED_AS_MANIPULATION" : "FORENSIC_THREAT_CONFIRMED")
+      : (route === "ROUTE_3_STANCE_VERIFICATION" ? "STANCE_CLEARED_BENIGN" : "FORENSIC_CLEARED_BENIGN"), {
       route,
       endorsed: result.endorsed,
       hasExplanation: !!result.deepResearchExplanation,
@@ -196,19 +198,30 @@ function fallbackStanceOrForensic(
   failedRiskIds: QuestionId[],
   model: string
 ): ForensicResult {
-  if (route === "ROUTE_3_STANCE_VERIFICATION") {
-    const isQuoting = /"|"|'|according to|stated that|claimed that/i.test(text);
-    if (isQuoting) {
-      debugDecision("HydrogenResearch", "STANCE_CLEARED_BENIGN (Quoting / Reporting detected)", {
-        route,
-        endorsed: false,
-      });
-      return {
-        endorsed: false,
-        deepResearchExplanation: null,
-        modelUsed: model,
-      };
-    }
+  const isQuoting = /"|"|'|according to|stated that|claimed that|reported that|spokesperson|reporters/i.test(text);
+
+  if (route === "ROUTE_3_STANCE_VERIFICATION" && isQuoting) {
+    debugDecision("HydrogenResearch", "STANCE_CLEARED_BENIGN (Quoting / Reporting detected)", {
+      route,
+      endorsed: false,
+    });
+    return {
+      endorsed: false,
+      deepResearchExplanation: null,
+      modelUsed: model,
+    };
+  }
+
+  if (route === "ROUTE_4_FORENSIC_THREAT" && isQuoting && failedRiskIds.length <= 1) {
+    debugDecision("HydrogenResearch", "FORENSIC_CLEARED_BENIGN (Journalistic quoting in fallback)", {
+      route,
+      endorsed: false,
+    });
+    return {
+      endorsed: false,
+      deepResearchExplanation: null,
+      modelUsed: model,
+    };
   }
 
   const names = failedRiskIds.map((id) => SEMEVAL_QUESTIONS[id]?.name || id).join(", ");

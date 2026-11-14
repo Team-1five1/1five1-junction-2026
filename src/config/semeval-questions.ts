@@ -1,86 +1,285 @@
+export type RiskQuestionId = `Q${number}`;
+export type ShieldQuestionId = `S${number}`;
+export type QuestionId = RiskQuestionId | ShieldQuestionId;
+
+export type QuestionBucket =
+  | "EMOTION"
+  | "IDENTITY_AUTHORITY"
+  | "FALLACY_DEFLECTION"
+  | "SEVERE_MANIPULATION"
+  | "SHIELDS";
+
 export interface SemEvalQuestion {
-  id: `Q${number}`;
+  id: QuestionId;
   num: number;
-  bucket: number;
+  bucket: QuestionBucket;
   name: string;
   pointsOrFlags: number;
   tier?: 1 | 2 | 3;
   description: string;
   isShield: boolean;
+  isDeterministicOnly?: boolean;
 }
 
-export const SEMEVAL_QUESTIONS: Record<`Q${number}`, SemEvalQuestion> = {
-  // Bucket 1: Manipulative Wording & Emotional Framing
-  Q1: { id: "Q1", num: 1, bucket: 1, name: "Loaded Words", pointsOrFlags: 1, tier: 1, description: "Does the text use intense emotional words where neutral words would fit?", isShield: false },
-  Q2: { id: "Q2", num: 2, bucket: 1, name: "Exaggeration", pointsOrFlags: 1, tier: 1, description: "Does it blow the scale, severity, or impact of an event wildly out of proportion?", isShield: false },
-  Q3: { id: "Q3", num: 3, bucket: 1, name: "Minimization", pointsOrFlags: 1, tier: 1, description: "Does it downplay or brush off documented harm, casualties, or wrongdoing as trivial?", isShield: false },
-  Q4: { id: "Q4", num: 4, bucket: 1, name: "Alarmist Formatting", pointsOrFlags: 1, tier: 1, description: "Does it use ALL CAPS, excessive exclamation marks, or siren emojis to force an emotional reaction?", isShield: false },
-  Q5: { id: "Q5", num: 5, bucket: 1, name: "Intentional Vagueness", pointsOrFlags: 1, tier: 1, description: "Does it use confusing jargon or murky phrasing to hide a weak or unproven claim?", isShield: false },
-  Q6: { id: "Q6", num: 6, bucket: 1, name: "Bait-and-Switch Framing", pointsOrFlags: 1, tier: 1, description: "Does the opening line promise a shocking revelation that the rest of the text fails to support?", isShield: false },
-  Q7: { id: "Q7", num: 7, bucket: 1, name: "Unbacked Absolutes", pointsOrFlags: 1, tier: 1, description: "Does it rely on absolute terms like 'always', 'never', or '100% undeniable' without data?", isShield: false },
-  Q8: { id: "Q8", num: 8, bucket: 1, name: "Dehumanizing Metaphors", pointsOrFlags: 3, tier: 3, description: "Does it compare people or groups to pests, diseases, floods, or parasites?", isShield: false },
+export const SEMEVAL_QUESTIONS: Record<QuestionId, SemEvalQuestion> = {
+  // ---------------------------------------------------------------------------
+  // Tier 1 — Emotional Framing & Repetition (1 pt each, Bucket: EMOTION)
+  // ---------------------------------------------------------------------------
+  Q1: {
+    id: "Q1",
+    num: 1,
+    bucket: "EMOTION",
+    name: "Loaded Language",
+    pointsOrFlags: 1,
+    tier: 1,
+    description: "Does the text use emotionally charged, vivid, graphic, or sensational words, scandalous accusations, metaphors, or scare quotes (e.g. vivid descriptions of misconduct, 'doomed', 'severe trouble', 'scandal', 'disaster', 'travesty', 'corrupt', 'childish', 'evil') to evoke indignation, disgust, or shock? (Excludes neutral news prose and direct quotes of public health data).",
+    isShield: false,
+  },
+  Q2: {
+    id: "Q2",
+    num: 2,
+    bucket: "EMOTION",
+    name: "Exaggeration / Minimization",
+    pointsOrFlags: 1,
+    tier: 1,
+    description: "Does it use extreme hyperbole, dramatic intensifiers, or sweeping magnification (e.g. 'extremely', 'unprecedented in history', 'completely doomed', 'massive disaster'), OR dismiss serious harm as totally trivial? (CRITICAL: Mild comparative descriptions like 'larger than usual' or factual estimates are NOT hyperbole).",
+    isShield: false,
+  },
+  Q3: {
+    id: "Q3",
+    num: 3,
+    bucket: "EMOTION",
+    name: "Repetition / Slogans",
+    pointsOrFlags: 1,
+    tier: 1,
+    description: "Does the text repeat words/phrases for rhetorical emphasis (e.g. 'very, very', 'again and again', 'fight, fight, fight'), OR use a memorable political catchphrase, campaign slogan, protest chant, or activist branding (e.g. 'Stop Islamization', 'Build the wall', 'America First', 'Take back control')?",
+    isShield: false,
+  },
+  Q4: {
+    id: "Q4",
+    num: 4,
+    bucket: "EMOTION",
+    name: "Thought-Terminating Cliché",
+    pointsOrFlags: 1,
+    tier: 1,
+    description: "Does it use dismissive sayings, idioms, or platitudes (e.g. 'it is what it is', 'end of story', 'wake up', 'common sense dictates') to shut down inquiry and debate?",
+    isShield: false,
+  },
 
-  // Bucket 2: Stereotyping, Labeling & Reputation Attacks
-  Q9: { id: "Q9", num: 9, bucket: 2, name: "Name-Calling", pointsOrFlags: 2, tier: 2, description: "Does it attach an insulting label or nickname to a person or group instead of addressing actions?", isShield: false },
-  Q10: { id: "Q10", num: 10, bucket: 2, name: "Sweeping Stereotypes", pointsOrFlags: 3, tier: 3, description: "Does it assign a single negative trait, motive, or behavior to an entire demographic or group?", isShield: false },
-  Q11: { id: "Q11", num: 11, bucket: 2, name: "Guilt by Association", pointsOrFlags: 2, tier: 2, description: "Does it discredit an idea or person solely by linking them to a hated or extremist group?", isShield: false },
-  Q12: { id: "Q12", num: 12, bucket: 2, name: "Extreme Historical Comparisons", pointsOrFlags: 2, tier: 2, description: "Does it compare an opponent or policy to Nazis, Hitler, or totalitarian regimes to shut down debate?", isShield: false },
-  Q13: { id: "Q13", num: 13, bucket: 2, name: "Assumed Malice", pointsOrFlags: 2, tier: 2, description: "Does it claim an opponent acts out of pure evil, greed, or treason rather than a difference of opinion?", isShield: false },
-  Q14: { id: "Q14", num: 14, bucket: 2, name: "Manufactured Doubt", pointsOrFlags: 2, tier: 2, description: "Does it undermine trust in a person or institution solely through unverified insinuations?", isShield: false },
-  Q15: { id: "Q15", num: 15, bucket: 2, name: "Hypocrisy Deflection", pointsOrFlags: 2, tier: 2, description: "Does it dismiss an argument solely by accusing the speaker of past hypocrisy?", isShield: false },
-  Q16: { id: "Q16", num: 16, bucket: 2, name: "Out-Group Villainization", pointsOrFlags: 3, tier: 3, description: "Does it portray an opposing group as inherently corrupt, dangerous, or beyond redemption?", isShield: false },
-  Q17: { id: "Q17", num: 17, bucket: 2, name: "Shadowy Cabal Framing", pointsOrFlags: 3, tier: 3, description: "Does it blame a secret, unnamed elite ('puppet masters', 'they') for complex events?", isShield: false },
+  // ---------------------------------------------------------------------------
+  // Tier 2 — Identity, Authority & Rhetorical Fallacies (2 pts each)
+  // Bucket: IDENTITY_AUTHORITY
+  // ---------------------------------------------------------------------------
+  Q5: {
+    id: "Q5",
+    num: 5,
+    bucket: "IDENTITY_AUTHORITY",
+    name: "Name-Calling / Labeling",
+    pointsOrFlags: 2,
+    tier: 2,
+    description: "Does it attach an insulting, derogatory, or villainizing label (e.g. 'crooked', 'traitors', 'thugs', 'puppets', 'extremists') to discredit an opponent, group, or idea?",
+    isShield: false,
+  },
+  Q6: {
+    id: "Q6",
+    num: 6,
+    bucket: "IDENTITY_AUTHORITY",
+    name: "Doubt / Insinuation",
+    pointsOrFlags: 2,
+    tier: 2,
+    description: "Does it question the competence, credibility, honesty, or capability of an official, leader, or institution, quote critics speculating, or use scare quotes to label a controversial policy (e.g. claiming they 'haven\\'t learned', 'failed to do their jobs', 'prompted critics to speculate', scare-quoted 'sanctuary' policy)? (Excludes standard legal hedges like 'allegedly' and balanced journalistic skepticism).",
+    isShield: false,
+  },
+  Q7: {
+    id: "Q7",
+    num: 7,
+    bucket: "IDENTITY_AUTHORITY",
+    name: "Appeal to Authority",
+    pointsOrFlags: 2,
+    tier: 2,
+    description: "Does it cite a leader, official, or self-serving office statement to validate an unverified claim, assert personal innocence, or lend credibility to a speculative prediction? (CRITICAL: Routine journalistic reporting of enacted government policies, bans, or official administrative actions, e.g. 'the Home Office banned X', is NOT an appeal to authority).",
+    isShield: false,
+  },
+  Q8: {
+    id: "Q8",
+    num: 8,
+    bucket: "IDENTITY_AUTHORITY",
+    name: "Flag-Waving / Group Loyalty",
+    pointsOrFlags: 2,
+    tier: 2,
+    description: "Does the author explicitly appeal to patriotism, national pride, religion, or 'us vs them' civic loyalty ('we the people', 'our country', 'our sacred values', 'stage for our nation') to attack rivals or justify a policy? (CRITICAL: Routine news reporting about a protest location or mentioning group names like EDL is NOT flag-waving).",
+    isShield: false,
+  },
+  Q9: {
+    id: "Q9",
+    num: 9,
+    bucket: "IDENTITY_AUTHORITY",
+    name: "Bandwagon Pressure",
+    pointsOrFlags: 2,
+    tier: 2,
+    description: "Does it pressure the reader to conform by claiming 'everyone knows', 'the majority supports this', or urging people to join a popular wave?",
+    isShield: false,
+  },
 
-  // Bucket 3: Fear, Prejudice & Group Identity Appeals
-  Q18: { id: "Q18", num: 18, bucket: 3, name: "Existential Fear Appeal", pointsOrFlags: 3, tier: 3, description: "Does it claim that failing to agree will destroy the reader's safety, family, or way of life?", isShield: false },
-  Q19: { id: "Q19", num: 19, bucket: 3, name: "Prejudice Activation", pointsOrFlags: 3, tier: 3, description: "Does it tap into preexisting racial, religious, class, or cultural resentments to provoke anger?", isShield: false },
-  Q20: { id: "Q20", num: 20, bucket: 3, name: "Flag-Waving / Loyalty Test", pointsOrFlags: 2, tier: 2, description: "Does it claim that supporting its viewpoint is the only way to be a 'true patriot' or loyal member?", isShield: false },
-  Q21: { id: "Q21", num: 21, bucket: 3, name: "In-Group Flattery", pointsOrFlags: 2, tier: 2, description: "Does it praise the reader's group as uniquely virtuous, hardworking, or enlightened compared to outsiders?", isShield: false },
-  Q22: { id: "Q22", num: 22, bucket: 3, name: "Bandwagon Pressure", pointsOrFlags: 2, tier: 2, description: "Does it argue that 'everyone is waking up' or 'millions already agree' to pressure conformity?", isShield: false },
-  Q23: { id: "Q23", num: 23, bucket: 3, name: "False Authority", pointsOrFlags: 2, tier: 2, description: "Does it cite an unqualified celebrity, anonymous 'insider', or vague 'experts' to validate a claim?", isShield: false },
-  Q24: { id: "Q24", num: 24, bucket: 3, name: "Weaponized Values", pointsOrFlags: 2, tier: 2, description: "Does it invoke religion, children's safety, or moral purity to make questioning the argument seem immoral?", isShield: false },
-  Q25: { id: "Q25", num: 25, bucket: 3, name: "Grievance Amplification", pointsOrFlags: 3, tier: 3, description: "Does it tell the audience they are being systematically humiliated, replaced, or cheated by an out-group?", isShield: false },
+  // ---------------------------------------------------------------------------
+  // Tier 2 — Rhetorical Fallacies (2 pts each)
+  // Bucket: FALLACY_DEFLECTION
+  // ---------------------------------------------------------------------------
+  Q10: {
+    id: "Q10",
+    num: 10,
+    bucket: "FALLACY_DEFLECTION",
+    name: "Causal Oversimplification",
+    pointsOrFlags: 2,
+    tier: 2,
+    description: "Does it blame a complex societal or economic problem on a single scapegoat, group, or policy, or offer a simplistic magic-bullet fix?",
+    isShield: false,
+  },
+  Q11: {
+    id: "Q11",
+    num: 11,
+    bucket: "FALLACY_DEFLECTION",
+    name: "Whataboutism",
+    pointsOrFlags: 2,
+    tier: 2,
+    description: "Does it evade a direct criticism or accusation by pointing to unrelated misconduct or hypocrisy by an opponent instead of answering?",
+    isShield: false,
+  },
+  Q12: {
+    id: "Q12",
+    num: 12,
+    bucket: "FALLACY_DEFLECTION",
+    name: "Strawman / Red Herring",
+    pointsOrFlags: 2,
+    tier: 2,
+    description: "Does it distort an opponent position into an absurd caricature, OR introduce an emotional distraction to derail the core issue?",
+    isShield: false,
+  },
+  Q13: {
+    id: "Q13",
+    num: 13,
+    bucket: "FALLACY_DEFLECTION",
+    name: "Slippery Slope / Cherry-Picking",
+    pointsOrFlags: 2,
+    tier: 2,
+    description: "Does it claim without evidence that a moderate initial action will inevitably trigger a catastrophic chain reaction, OR treat an isolated anecdote as proof of a sweeping trend?",
+    isShield: false,
+  },
 
-  // Bucket 4: Oversimplification & Logical Traps
-  Q26: { id: "Q26", num: 26, bucket: 4, name: "Black-and-White Fallacy", pointsOrFlags: 3, tier: 3, description: "Does it present only two extreme choices ('with us or against us') while ignoring middle ground?", isShield: false },
-  Q27: { id: "Q27", num: 27, bucket: 4, name: "Single-Cause Scapegoating", pointsOrFlags: 3, tier: 3, description: "Does it blame a complex economic, social, or political problem entirely on one person or group?", isShield: false },
-  Q28: { id: "Q28", num: 28, bucket: 4, name: "Magic-Bullet / Total-Ruin Claim", pointsOrFlags: 2, tier: 2, description: "Does it claim a single policy or action will automatically fix everything or cause total collapse?", isShield: false },
-  Q29: { id: "Q29", num: 29, bucket: 4, name: "Slippery Slope", pointsOrFlags: 2, tier: 2, description: "Does it assert without evidence that a minor step will inevitably trigger a chain reaction to disaster?", isShield: false },
-  Q30: { id: "Q30", num: 30, bucket: 4, name: "Cherry-Picked Anecdote", pointsOrFlags: 2, tier: 2, description: "Does it use one isolated, extreme incident as proof of a massive nationwide trend?", isShield: false },
-  Q31: { id: "Q31", num: 31, bucket: 4, name: "Coincidence as Conspiracy", pointsOrFlags: 2, tier: 2, description: "Does it treat two unrelated events happening at the same time as proof of a coordinated plot?", isShield: false },
-  Q32: { id: "Q32", num: 32, bucket: 4, name: "No-Choice Framing", pointsOrFlags: 2, tier: 2, description: "Does it state an aggressive or controversial action as the 'only possible option' left?", isShield: false },
+  // ---------------------------------------------------------------------------
+  // Tier 3 — Severe Fear, Hatred & Conspiracy (3 pts each, Bucket: SEVERE_MANIPULATION)
+  // ---------------------------------------------------------------------------
+  Q14: {
+    id: "Q14",
+    num: 14,
+    bucket: "SEVERE_MANIPULATION",
+    name: "Appeal to Fear / Alarmism",
+    pointsOrFlags: 3,
+    tier: 3,
+    description: "Does it warn of impending danger, crisis, or catastrophic harm to arouse anxiety or panic in the audience? (CRITICAL: Explaining biological resistance, flea vector control, or factual disease statistics without threat warnings is NOT alarmism).",
+    isShield: false,
+  },
+  Q15: {
+    id: "Q15",
+    num: 15,
+    bucket: "SEVERE_MANIPULATION",
+    name: "Sweeping Stereotypes / Out-Group Hatred",
+    pointsOrFlags: 3,
+    tier: 3,
+    description: "Does it portray an entire demographic, political, or social group as inherently malicious, inferior, or dangerous?",
+    isShield: false,
+  },
+  Q16: {
+    id: "Q16",
+    num: 16,
+    bucket: "SEVERE_MANIPULATION",
+    name: "Dehumanization / Nazi Comparison",
+    pointsOrFlags: 3,
+    tier: 3,
+    description: "Does the author attack an opponent or group by comparing them to vermin, pests, animals, or diseases, OR by labeling them Nazis or Hitler? (CRITICAL: Routine news reporting that mentions the names of civic organizations, e.g. 'anti-fascism campaigners', is NOT dehumanization).",
+    isShield: false,
+  },
+  Q17: {
+    id: "Q17",
+    num: 17,
+    bucket: "SEVERE_MANIPULATION",
+    name: "Shadowy Cabal / Conspiracy",
+    pointsOrFlags: 3,
+    tier: 3,
+    description: "Does it claim a sinister secret elite, cabal, or 'deep state' is covertly manipulating world events?",
+    isShield: false,
+  },
+  Q18: {
+    id: "Q18",
+    num: 18,
+    bucket: "SEVERE_MANIPULATION",
+    name: "Black-and-White / Dictatorship",
+    pointsOrFlags: 3,
+    tier: 3,
+    description: "Does it reduce a nuanced situation to an absolute binary choice ('you are either with us or against us', 'the only way')?",
+    isShield: false,
+  },
 
-  // Bucket 5: Distraction, Deflection & Disinformation Tactics
-  Q33: { id: "Q33", num: 33, bucket: 5, name: "Whataboutism", pointsOrFlags: 2, tier: 2, description: "Does it deflect a specific criticism by pointing to a completely different wrongdoing by someone else?", isShield: false },
-  Q34: { id: "Q34", num: 34, bucket: 5, name: "Strawman Distortion", pointsOrFlags: 2, tier: 2, description: "Does it exaggerate or twist an opponent's actual position into something absurd to attack it?", isShield: false },
-  Q35: { id: "Q35", num: 35, bucket: 5, name: "Red Herring", pointsOrFlags: 2, tier: 2, description: "Does it introduce an emotionally charged, irrelevant side topic to distract from the main issue?", isShield: false },
-  Q36: { id: "Q36", num: 36, bucket: 5, name: "Unverifiable Sourcing", pointsOrFlags: 2, tier: 2, description: "Does it rely on phrases like 'sources say' or 'what they don't want you to know' with zero checkable citations?", isShield: false },
-  Q37: { id: "Q37", num: 37, bucket: 5, name: "Disguised Partisanship", pointsOrFlags: 3, tier: 3, description: "Does it mimic the style of an objective breaking-news alert while presenting only one-sided propaganda?", isShield: false },
-  Q38: { id: "Q38", num: 38, bucket: 5, name: "Contradictory Flooding", pointsOrFlags: 3, tier: 3, description: "Does it throw out multiple conflicting explanations at once just to muddy the waters?", isShield: false },
+  // ---------------------------------------------------------------------------
+  // Deterministic Network / Swarm Signal (Reserved strictly for Bun detector)
+  // ---------------------------------------------------------------------------
+  Q19: {
+    id: "Q19",
+    num: 19,
+    bucket: "SEVERE_MANIPULATION",
+    name: "Comment Swarm / Bot Template",
+    pointsOrFlags: 3,
+    tier: 3,
+    description: "Deterministic pattern clustering, template phrasing, or bot telemetry score (evaluated exclusively by Bun).",
+    isShield: false,
+    isDeterministicOnly: true,
+  },
 
-  // Bucket 6: Bot Amplification, Urgency & Thought-Killers
-  Q39: { id: "Q39", num: 39, bucket: 6, name: "Thought-Terminating Cliché", pointsOrFlags: 1, tier: 1, description: "Does it use a canned phrase ('It is what it is', 'Follow the money') to stop critical thinking?", isShield: false },
-  Q40: { id: "Q40", num: 40, bucket: 6, name: "Slogan Repetition", pointsOrFlags: 1, tier: 1, description: "Does it repeat the exact same catchphrase or talking point multiple times within a short text?", isShield: false },
-  Q41: { id: "Q41", num: 41, bucket: 6, name: "Artificial Urgency", pointsOrFlags: 3, tier: 3, description: "Does it pressure the reader to act or share immediately before 'it gets censored/deleted'?", isShield: false },
-  Q42: { id: "Q42", num: 42, bucket: 6, name: "Engagement Bait", pointsOrFlags: 1, tier: 1, description: "Does it end with a manipulative hook designed purely to farm algorithm replies ('Bet you won't repost this')?", isShield: false },
-  Q43: { id: "Q43", num: 43, bucket: 6, name: "Keyword/Hashtag Stuffing", pointsOrFlags: 1, tier: 1, description: "Does it pack unrelated trending hashtags, @mentions, or keywords to hijack search feeds?", isShield: false },
-  Q44: { id: "Q44", num: 44, bucket: 6, name: "Template Phrasing", pointsOrFlags: 3, tier: 3, description: "Does the sentence structure feel like a rigid, copy-pasted script used in coordinated comment swarms?", isShield: false },
-
-  // Bucket 7: False-Positive Shields / Benign Context Checks
-  Q45: { id: "Q45", num: 45, bucket: 7, name: "Satire or Parody", pointsOrFlags: 1, description: "Does the text show clear signs of comedy, irony, absurd exaggeration, or meme humor?", isShield: true },
-  Q46: { id: "Q46", num: 46, bucket: 7, name: "Neutral Reporting/Quoting", pointsOrFlags: 2, description: "Is the author only quoting or describing extreme language in order to report on it neutrally?", isShield: true },
-  Q47: { id: "Q47", num: 47, bucket: 7, name: "Counterspeech/Debunking", pointsOrFlags: 2, description: "Is the text mentioning a stereotype, fallacy, or conspiracy specifically to criticize or disprove it?", isShield: true },
-  Q48: { id: "Q48", num: 48, bucket: 7, name: "Balanced Perspective", pointsOrFlags: 1, description: "Does the author acknowledge counterarguments, nuance, or limitations in their own position?", isShield: true },
-  Q49: { id: "Q49", num: 49, bucket: 7, name: "Verifiable Receipts", pointsOrFlags: 2, description: "Does the text back up its strong claims with specific, checkable data, dates, or named primary sources?", isShield: true },
-  Q50: { id: "Q50", num: 50, bucket: 7, name: "Everyday Personal Venting", pointsOrFlags: 1, description: "Is the emotional language just a normal person complaining about a product, service, sports game, or bad day?", isShield: true },
+  // ---------------------------------------------------------------------------
+  // Strict False-Positive Shields (S1–S4 — Evaluated Separately, Bucket: SHIELDS)
+  // ---------------------------------------------------------------------------
+  S1: {
+    id: "S1",
+    num: 1,
+    bucket: "SHIELDS",
+    name: "Active Fact-Check / Debunking",
+    pointsOrFlags: 2,
+    description: "Is the primary purpose of the entire text to disprove, fact-check, or criticize a manipulative claim or conspiracy theory?",
+    isShield: true,
+  },
+  S2: {
+    id: "S2",
+    num: 2,
+    bucket: "SHIELDS",
+    name: "Balanced Multi-Sided Reporting",
+    pointsOrFlags: 2,
+    description: "Does the author present competing viewpoints neutrally in balanced journalism without taking a partisan side or using manipulative spin?",
+    isShield: true,
+  },
+  S3: {
+    id: "S3",
+    num: 3,
+    bucket: "SHIELDS",
+    name: "Satire / Absurd Parody",
+    pointsOrFlags: 1,
+    description: "Is the text clearly comedic satire, parody, or absurd humor not meant to be taken literally?",
+    isShield: true,
+  },
+  S4: {
+    id: "S4",
+    num: 4,
+    bucket: "SHIELDS",
+    name: "Everyday Consumer / Sports Venting",
+    pointsOrFlags: 1,
+    description: "Is this purely a personal complaint about a product, service, customer support, or sports match with zero political or social agenda?",
+    isShield: true,
+  },
 };
 
-export const BUCKET_NAMES: Record<number, string> = {
-  1: "Manipulative Wording & Emotional Framing",
-  2: "Stereotyping, Labeling & Reputation Attacks",
-  3: "Fear, Prejudice & Group Identity Appeals",
-  4: "Oversimplification & Logical Traps",
-  5: "Distraction, Deflection & Disinformation Tactics",
-  6: "Bot Amplification, Urgency & Thought-Killers",
-  7: "False-Positive Shields / Benign Context Checks",
+export const BUCKET_NAMES: Record<QuestionBucket, string> = {
+  EMOTION: "Tier 1: Emotional Framing & Repetition",
+  IDENTITY_AUTHORITY: "Tier 2: Identity, Authority & Loyalty",
+  FALLACY_DEFLECTION: "Tier 2: Rhetorical Fallacies & Deflection",
+  SEVERE_MANIPULATION: "Tier 3: Severe Fear, Hatred & Conspiracy",
+  SHIELDS: "Strict False-Positive Shields",
 };

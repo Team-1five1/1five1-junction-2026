@@ -27,7 +27,8 @@ describe("Truthier API Endpoints", () => {
     const data = (await res.json()) as any;
     expect(data.risk_score).toBeGreaterThanOrEqual(7);
     expect(data.route).toBe("ROUTE_4_FORENSIC_THREAT");
-    expect(data.model_used).toBe("gemini-4-hydrogen");
+    const expectedModel = process.env.MODEL_HEAVY_RESEARCH || "gemini-4-hydrogen";
+    expect(data.model_used).toBe(expectedModel);
     expect(data.deep_research_explanation).not.toBeNull();
   }, 20000);
 

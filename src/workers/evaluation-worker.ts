@@ -233,10 +233,10 @@ export async function processEvaluationJob(data: EvaluationJobData) {
       scoreRes.failedRiskIds
     );
 
-    if (scoreRes.route === "ROUTE_3_STANCE_VERIFICATION" && !forensicRes.endorsed) {
+    if (!forensicRes.endorsed) {
       visibility = "public";
       explanation = null;
-      debugDecision("Worker", "ROUTE_3_CLEARED_AS_BENIGN", {
+      debugDecision("Worker", `${scoreRes.route}_CLEARED_AS_BENIGN`, {
         commentId: wpCommentId,
         visibility: "public",
       });
