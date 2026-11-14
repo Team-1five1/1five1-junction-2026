@@ -32,10 +32,18 @@ class Shield_Renderer {
         );
 
         wp_enqueue_script(
+            'shield-botd',
+            plugins_url('assets/botd.bundle.js', dirname(__FILE__)),
+            array(),
+            '2.0.0',
+            true
+        );
+
+        wp_enqueue_script(
             'shield-collector',
             plugins_url('assets/collector.js', dirname(__FILE__)),
-            array(),
-            '1.0.3',
+            array('shield-botd'),
+            '2.0.0',
             true
         );
 
@@ -73,6 +81,9 @@ class Shield_Renderer {
      * Appends banner, SemEval question badges, and Deep Research Explanation card to flagged comments.
      */
     public function render_comment_badges_and_explanation($comment_text, $comment = null) {
+        if (!$comment) {
+            $comment = get_comment();
+        }
         if (!$comment) {
             return $comment_text;
         }

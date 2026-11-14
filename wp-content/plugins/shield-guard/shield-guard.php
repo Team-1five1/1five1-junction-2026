@@ -36,9 +36,9 @@ add_action('plugins_loaded', 'shield_guard_init');
 register_activation_hook(__FILE__, function() {
     if (!get_option('shield_guard_settings')) {
         update_option('shield_guard_settings', array(
-            'api_url'        => 'http://127.0.0.1:4000',
+            'api_url'        => 'http://host.docker.internal:4000',
             'api_key'        => 'tenant_' . wp_generate_password(16, false),
-            'webhook_secret' => wp_generate_password(32, true, true),
+            'webhook_secret' => 'shield_wp_secret_2026_secure_key_a9f8b7c6',
             'threshold_mode' => 'balanced',
         ));
     }

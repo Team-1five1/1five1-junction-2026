@@ -8,6 +8,11 @@ import { screenWithJev } from "../ai/jev-screener";
 import { evaluateSemEvalBitmask, type ThresholdMode } from "../engines/semeval-scorer";
 import { verifyStanceOrForensic, investigateReviewBombing } from "../ai/hydrogen-research";
 import type { BotEvaluationResult } from "../engines/bot-telemetry";
+import {
+  recordHoneypotSubmission,
+  lookupHoneypotCluster,
+  resetHoneypotClusters,
+} from "../engines/honeypot-cluster";
 import { debugLog, debugDecision } from "../config/logger";
 
 export interface EvaluationJobData {
@@ -31,7 +36,31 @@ let redisConnection: Redis | null = null;
 let evaluationQueue: Queue<EvaluationJobData> | null = null;
 
 export const inMemoryBanners = new Map<string, { entityId: string; anomalyStatus: string; bannerExplanation: string | null }>();
-const inMemoryReviewTracker = new Map<string, Array<{ rating: number; text: string; createdAt: Date }>>();
+export const inMemoryReviewTracker = new Map<string, Array<{ rating: number; text: string; createdAt: Date }>>();
+export interface HoneypotVaultRecord {
+  id: string;
+  wpCommentId: number;
+  entityId: string;
+  authorSessionHash: string;
+  rawText: string;
+  ipAddress: string;
+  userAgent: string;
+  routingPath: "BOT_HONEYPOT" | "STAGE_1B_HONEYPOT_CLUSTER";
+  patternClusterId: string;
+  similarity?: number;
+  confidenceScore: number;
+  reasons: string[];
+  telemetry: Record<string, any>;
+  createdAt: string;
+}
+export const inMemoryHoneypotVault: HoneypotVaultRecord[] = [];
+
+export function resetInMemoryState(): void {
+  inMemoryBanners.clear();
+  inMemoryReviewTracker.clear();
+  inMemoryHoneypotVault.length = 0;
+  resetHoneypotClusters();
+}
 
 function getRedisConnection(): Redis {
   if (!redisConnection) {
@@ -52,6 +81,9 @@ function getRedisConnection(): Redis {
 }
 
 export function getEvaluationQueue(): Queue<EvaluationJobData> | null {
+  if (process.env.ENABLE_BULLMQ !== "true") {
+    return null;
+  }
   try {
     if (!evaluationQueue) {
       const conn = getRedisConnection();
@@ -61,7 +93,7 @@ export function getEvaluationQueue(): Queue<EvaluationJobData> | null {
     }
     return evaluationQueue;
   } catch (err: any) {
-    console.warn(`Failed to initialize BullMQ queue: ${err.message}`);
+    debugLog("BullMQ", `Failed to initialize BullMQ queue: ${err.message}`);
     return null;
   }
 }
@@ -133,15 +165,35 @@ export async function processEvaluationJob(data: EvaluationJobData) {
     thresholdMode,
   });
 
-  // 1. Bot Path
+  // 1. Stage 1A / 1B Direct Bot Path (Telemetry & Honeypot Trap)
   if (botResult.isBot) {
+    const clusterInfo = recordHoneypotSubmission(rawText, authorSessionHash, botResult.reasons);
+
     debugDecision("Worker", "BOT_PATH_ENGAGED", {
       wpCommentId,
       visibility: "shadowbanned",
+      patternClusterId: clusterInfo.clusterId,
       reasons: botResult.reasons,
     });
 
     let subId = crypto.randomUUID();
+    inMemoryHoneypotVault.unshift({
+      id: subId,
+      wpCommentId,
+      entityId,
+      authorSessionHash,
+      rawText,
+      ipAddress,
+      userAgent,
+      routingPath: "BOT_HONEYPOT",
+      patternClusterId: clusterInfo.clusterId,
+      confidenceScore: botResult.confidenceScore,
+      reasons: botResult.reasons,
+      telemetry: botResult.telemetry,
+      createdAt: new Date().toISOString(),
+    });
+    if (inMemoryHoneypotVault.length > 500) inMemoryHoneypotVault.pop();
+
     try {
       const [sub] = await db
         .insert(submissions)
@@ -173,11 +225,11 @@ export async function processEvaluationJob(data: EvaluationJobData) {
           confidenceScore: botResult.confidenceScore,
           reasons: botResult.reasons,
         },
-        patternClusterId: "cluster_headless_generic",
+        patternClusterId: clusterInfo.clusterId,
       });
-      debugLog("Worker", `Honeypot vault entry recorded for comment #${wpCommentId}`);
+      debugLog("Worker", `Honeypot vault entry recorded for comment #${wpCommentId} (cluster: ${clusterInfo.clusterId})`);
     } catch (dbErr: any) {
-      console.warn(`DB insert failed for bot submission: ${dbErr.message}`);
+      debugLog("Worker", `DB insert skipped/failed for bot submission: ${dbErr.message}`);
     }
 
     // Notify WordPress to mark comment shadowbanned
@@ -186,6 +238,8 @@ export async function processEvaluationJob(data: EvaluationJobData) {
       entityId,
       visibility: "shadowbanned",
       authorType: "bot",
+      routingPath: "BOT_HONEYPOT",
+      patternClusterId: clusterInfo.clusterId,
       modelUsed: "none",
       riskScore: 100,
       failedRiskIds: [],
@@ -198,6 +252,107 @@ export async function processEvaluationJob(data: EvaluationJobData) {
       wpCommentId,
       visibility: "shadowbanned",
       authorType: "bot",
+      routingPath: "BOT_HONEYPOT",
+      stage: "STAGE_1B_HONEYPOT",
+      patternClusterId: clusterInfo.clusterId,
+      reasons: botResult.reasons,
+      modelUsed: "none",
+      hasBanner: false,
+    };
+  }
+
+  // 1B. Stage 1B Honeypot Vector Lookup (Stealth Bots & Same-Hour Paraphrased Propaganda Waves)
+  const clusterMatch = lookupHoneypotCluster(rawText, authorSessionHash);
+  if (clusterMatch.matched && clusterMatch.clusterId) {
+    debugDecision("Worker", "STAGE_1B_HONEYPOT_CLUSTER_CAUGHT", {
+      wpCommentId,
+      visibility: "shadowbanned",
+      clusterId: clusterMatch.clusterId,
+      similarity: clusterMatch.similarity,
+      matchType: clusterMatch.matchType,
+    });
+
+    let subId = crypto.randomUUID();
+    inMemoryHoneypotVault.unshift({
+      id: subId,
+      wpCommentId,
+      entityId,
+      authorSessionHash,
+      rawText,
+      ipAddress,
+      userAgent,
+      routingPath: "STAGE_1B_HONEYPOT_CLUSTER",
+      patternClusterId: clusterMatch.clusterId,
+      similarity: clusterMatch.similarity,
+      confidenceScore: Math.round(clusterMatch.similarity * 100),
+      reasons: clusterMatch.reasons,
+      telemetry: botResult.telemetry,
+      createdAt: new Date().toISOString(),
+    });
+    if (inMemoryHoneypotVault.length > 500) inMemoryHoneypotVault.pop();
+
+    try {
+      const [sub] = await db
+        .insert(submissions)
+        .values({
+          wpCommentId,
+          entityId,
+          authorSessionHash,
+          rawText,
+          rating: rating ?? null,
+          authorType: "bot",
+          visibility: "shadowbanned",
+          routingPath: "STAGE_1B_HONEYPOT_CLUSTER",
+          modelUsed: "none",
+          riskScore: 95,
+          shieldFlags: 0,
+          failedRiskIds: [],
+          triggeredShieldIds: [],
+          deepResearchExplanation: null,
+        })
+        .returning();
+      if (sub) subId = sub.id;
+
+      await db.insert(honeypotVault).values({
+        submissionId: subId,
+        ipAddress,
+        userAgent,
+        telemetryJson: {
+          ...botResult.telemetry,
+          similarity: clusterMatch.similarity,
+          matchType: clusterMatch.matchType,
+          reasons: clusterMatch.reasons,
+        },
+        patternClusterId: clusterMatch.clusterId,
+      });
+    } catch (dbErr: any) {
+      debugLog("Worker", `DB insert skipped/failed for stealth bot submission: ${dbErr.message}`);
+    }
+
+    await sendWordPressWebhook(wpWebhookUrl, {
+      wpCommentId,
+      entityId,
+      visibility: "shadowbanned",
+      authorType: "bot",
+      routingPath: "STAGE_1B_HONEYPOT_CLUSTER",
+      patternClusterId: clusterMatch.clusterId,
+      modelUsed: "none",
+      riskScore: 95,
+      failedRiskIds: [],
+      triggeredShieldIds: [],
+      deepResearchExplanation: null,
+      banner: null,
+    });
+
+    return {
+      wpCommentId,
+      visibility: "shadowbanned",
+      authorType: "bot",
+      routingPath: "STAGE_1B_HONEYPOT_CLUSTER",
+      stage: "STAGE_1B_HONEYPOT_VECTOR",
+      patternClusterId: clusterMatch.clusterId,
+      similarity: clusterMatch.similarity,
+      reasons: clusterMatch.reasons,
       modelUsed: "none",
       hasBanner: false,
     };
@@ -280,12 +435,12 @@ export async function processEvaluationJob(data: EvaluationJobData) {
     });
     debugLog("Worker", `Recorded submission #${wpCommentId} to database (visibility: ${visibility})`);
   } catch (dbErr: any) {
-    console.warn(`DB insert failed for human submission: ${dbErr.message}`);
+    debugLog("Worker", `DB insert skipped/failed for human submission: ${dbErr.message}`);
   }
 
-  // Review Bombing Velocity Tracker for ratings
+  // Review Bombing Velocity Tracker for ratings (records all 1-5 star ratings to distinguish Organic Viral Spikes from 1-Star Review Bombs)
   let bannerPayload: { anomalyStatus: string; bannerExplanation: string | null } | null = null;
-  if (typeof rating === "number" && rating <= 2) {
+  if (typeof rating === "number" && rating >= 1 && rating <= 5) {
     try {
       const banner = await checkReviewBombingSpike(entityId, entityTitle, rating, rawText);
       if (banner) {
@@ -336,7 +491,7 @@ export async function processEvaluationJob(data: EvaluationJobData) {
         bannerExplanation,
       });
     } catch (dbErr: any) {
-      console.warn(`Failed to update entity banner in DB: ${dbErr.message}`);
+      debugLog("Worker", `Failed to update entity banner in DB: ${dbErr.message}`);
     }
   }
 
@@ -358,6 +513,8 @@ export async function processEvaluationJob(data: EvaluationJobData) {
     wpCommentId,
     visibility,
     authorType: "human",
+    routingPath: scoreRes.route,
+    stage: scoreRes.escalateToHydrogen ? "STAGE_2_HYDROGEN_FORENSIC" : "STAGE_2_SEMEVAL_FAST",
     modelUsed,
     riskScore: scoreRes.riskScore,
     failedRiskIds: scoreRes.failedRiskIds,
@@ -378,10 +535,19 @@ async function checkReviewBombingSpike(
   reviews.push({ rating, text, createdAt: new Date() });
   inMemoryReviewTracker.set(entityId, reviews);
 
-  const oneStarReviews = reviews.filter((r) => r.rating <= 2);
-  debugLog("VelocityTracker", `Rolling negative review count for ${entityId}: ${oneStarReviews.length}`);
+  if (rating > 2) {
+    return null;
+  }
 
-  if (oneStarReviews.length >= 3) {
+  const oneStarReviews = reviews.filter((r) => r.rating <= 2);
+  const negativeShare = oneStarReviews.length / reviews.length;
+  debugLog(
+    "VelocityTracker",
+    `Rolling negative review count for ${entityId}: ${oneStarReviews.length}/${reviews.length} (${Math.round(negativeShare * 100)}%)`
+  );
+
+  // Only trigger negative review spike when negative reviews >= 3 AND negative share >= 55% (protects Organic Viral Spikes with mixed 2/3/4/5★ ratings)
+  if (oneStarReviews.length >= 3 && negativeShare >= 0.55) {
     debugDecision("VelocityTracker", "NEGATIVE_REVIEW_SPIKE_TRIGGERED", {
       entityId,
       entityTitle,
@@ -414,7 +580,7 @@ async function checkReviewBombingSpike(
           },
         });
     } catch (dbErr: any) {
-      console.warn(`Failed to update entity banner in DB: ${dbErr.message}`);
+      debugLog("VelocityTracker", `Failed to update entity banner in DB: ${dbErr.message}`);
     }
 
     return {
@@ -427,6 +593,9 @@ async function checkReviewBombingSpike(
 }
 
 export function startWorker(): Worker<EvaluationJobData> | null {
+  if (process.env.ENABLE_BULLMQ !== "true") {
+    return null;
+  }
   try {
     const conn = getRedisConnection();
     const worker = new Worker<EvaluationJobData>(

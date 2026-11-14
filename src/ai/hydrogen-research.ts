@@ -233,7 +233,10 @@ function fallbackReviewBombing(
   model: string
 ): ReviewBombingInvestigation {
   const allTexts = recentReviews.map((r) => r.text).join(" ").toLowerCase();
-  const hasConcreteIssues = /patch|update|crash|server|bug|broken|outage|price|refund|customer service/i.test(allTexts);
+  const hasConcreteIssues =
+    /patch|update|crash|server|bug|broken|outage|price|refund|customer service|customer support|support|shipping|delivery|package|defective|battery|billing|charged|site|app|slow|lag|error|login/i.test(
+      allTexts
+    );
 
   let result: ReviewBombingInvestigation;
 

@@ -169,27 +169,30 @@ function fallbackRuleScreener(text: string, model: string): JevScreenResult {
 
   // Bucket 2: Stereotyping & Cabal
   if (/idiot|clown|scumbag|crook|shill/i.test(text)) triggered.add("Q9");
-  if (/all of them are|these people always|typical of that group/i.test(text)) triggered.add("Q10");
-  if (/puppet master|shadowy|the regime|globalist cabal|they don't want you to know|deep state/i.test(text)) {
+  if (/all of them are|these people always|typical of that group|corrupt globalists|corrupt elites|oligarchs/i.test(text)) triggered.add("Q10");
+  if (/puppet master|shadowy|the regime|globalist|cabal|they don't want you to know|deep state|secret elite|hidden hand|oligarch/i.test(text)) {
     triggered.add("Q17");
   }
 
   // Bucket 3: Fear & Identity
-  if (/threat to our existence|destroy our way of life|be afraid/i.test(text)) triggered.add("Q18");
-  if (/wake up|sheeple|stand with us or you're a traitor/i.test(text)) triggered.add("Q20");
+  if (/threat to our existence|destroy our way of life|be afraid|collapse our society|ruin our future/i.test(text)) triggered.add("Q18");
+  if (/wake up|sheeple|stand with us or you're a traitor|open your eyes|true patriots/i.test(text)) triggered.add("Q20");
 
   // Bucket 4: Oversimplification & Scapegoating
-  if (/only one to blame|it's entirely the fault of|scapegoat/i.test(text)) triggered.add("Q27");
+  if (/only one to blame|it's entirely the fault of|entirely to blame|scapegoat|solely responsible for ruining/i.test(text)) triggered.add("Q27");
   if (/with us or against us|either you love .* or you hate/i.test(text)) triggered.add("Q26");
 
   // Bucket 6: Urgency & Bots
-  if (/share before it gets deleted|act now before censorship|spread this immediately/i.test(text)) {
+  if (/share before it gets deleted|act now before censorship|spread this immediately|repost before they ban|before they scrub this|before it is censored/i.test(text)) {
     triggered.add("Q41");
   }
 
-  // Bucket 7: Shields
-  if (/i'm just annoyed that|had a rough experience with my order|personally felt/i.test(text) ||
-      (/hate|annoyed|bad/i.test(text) && /ordered|shipping|package|delay|refund/i.test(lower))) {
+  // Bucket 7: Shields (Everyday Personal Venting / Consumer Complaints)
+  if (
+    /i'm just annoyed that|had a rough experience with my order|personally felt/i.test(text) ||
+    (/worst|hate|annoyed|bad|terrible|awful|horrible|useless|garbage|trash|disappointed|frustrated/i.test(lower) &&
+      /ordered|shipping|package|delay|refund|support|customer service|site|app|crash|bug|broken|delivery|billing|charged|product|quality|defective|battery|screen|server|login|account|checkout/i.test(lower))
+  ) {
     triggered.add("Q50");
   }
   if (/according to the report|receipts:|source: http|page 4 of the filing/i.test(text)) {
