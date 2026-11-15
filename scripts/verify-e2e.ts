@@ -31,8 +31,8 @@ globalThis.fetch = (async (input: any, init: any) => {
   const url = String(input);
   if (url.includes("/systemone")) {
     const { state } = JSON.parse(init.body);
-    const ids = state.includes("forensic-fixture") ? ["Q8", "Q17", "Q41"] : ["Q50"];
-    return Response.json({ answers: { ...Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`Q${i + 1}`, { noul: ids.includes(`Q${i + 1}`) ? 0.99 : 0.01 }])), needsFactCheck: { noul: 0.01 }, needsWebSearch: { noul: state.includes("forensic-fixture") ? 0.99 : 0.01 } } });
+    const ids = state.includes("forensic-fixture") ? ["Q8", "Q17", "Q41"] : ["Q129"];
+    return Response.json({ answers: { ...Object.fromEntries(Array.from({ length: 134 }, (_, i) => [`Q${i + 1}`, { noul: ids.includes(`Q${i + 1}`) ? 0.99 : 0.01 }])), needsFactCheck: { noul: 0.01 }, needsWebSearch: { noul: state.includes("forensic-fixture") ? 0.99 : 0.01 } } });
   }
   if (url === "https://api.context.dev/v1/web/search") return Response.json({ results: [{ title: "Official patch notes", url: "https://example.org/patch", description: "Patch removed offline play.", markdown: { code: "SUCCESS", markdown: "The official patch removed offline play.", finalDOMState: "loaded" } }] });
   if (url === "https://api.context.dev/v1/news/search") return Response.json({ data: [] });
@@ -43,7 +43,7 @@ globalThis.fetch = (async (input: any, init: any) => {
       quotaRequests++;
       return Response.json({ error: { message: "Too many requests" } }, { status: 429, headers: { "Retry-After": "60" } });
     }
-    const result = messages[0].content.includes("review spike")
+    const result = messages[0].content.includes("negative reviews") || messages[0].content.includes("review spike")
       ? { anomalyStatus: "legitimate_backlash", bannerExplanation: "Customers report the patch removed offline play.", sourceUrls: ["https://example.org/patch"] }
       : { endorsed: true, explanation: "The text uses dehumanization and artificial urgency.", sufficientEvidence: true, claimChecks: [], quoteChecks: [], sourceUrls: ["https://example.org/patch"] };
     return Response.json({ model: process.env.MODEL_HEAVY_RESEARCH, choices: [{ message: { content: JSON.stringify(result) } }] });

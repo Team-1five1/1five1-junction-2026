@@ -32,7 +32,9 @@ export async function screenWithJev(text: string): Promise<JevScreenResult> {
       if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
         throw new ProviderError(`Jev returned an invalid answer for ${id}`);
       }
-      if (value >= 0.5) positive.add(id);
+      const isShield = id.startsWith("Q") && Number(id.slice(1)) >= 45;
+      const cutoff = isShield ? 0.50 : 0.45;
+      if (value >= cutoff) positive.add(id);
     }
     triggeredIds = Object.keys(questions).filter(id => positive.has(id)) as QuestionId[];
     needsFactCheck = positive.has("needsFactCheck");

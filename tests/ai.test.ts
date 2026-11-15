@@ -23,6 +23,7 @@ beforeEach(() => {
   process.env.CONTEXT_DEV_API_KEY = "test-search-key";
   process.env.MODEL_FAST_SCREENER = "jev-latest";
   process.env.MODEL_HEAVY_RESEARCH = "gpt-5-nano";
+  process.env.USE_TRUTHIER_STAGE1 = "false";
   globalThis.fetch = (async (input: any, init: any) => {
     requests.push({ url: String(input), body: JSON.parse(init.body), headers: init.headers });
     if (String(input) === "https://api.context.dev/v1/web/search") return searchError || Response.json({ results: searchResults.map(r => ({ ...r, description: r.content, markdown: { code: "SUCCESS", markdown: extracted.find(page => page.url === r.url)?.raw_content ?? "", finalDOMState: "loaded" } })) });
