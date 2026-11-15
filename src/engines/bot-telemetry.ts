@@ -4,11 +4,16 @@ import { debugLog, debugDecision } from "../config/logger";
 
 export interface BotTelemetryPayload {
   webdriver?: boolean;
+  botdDetected?: boolean;
+  botdKind?: string;
   keystrokeFlightVariance?: number;
   mouseEventsCount?: number;
   touchEventsCount?: number;
   formCompletionTimeMs?: number;
+  submitDwellMs?: number;
+  untrustedEventsCount?: number;
   honeypotTriggered?: boolean;
+  aiTrapTriggered?: boolean;
   timestamp?: number;
   keyCount?: number;
   [key: string]: any;
@@ -138,10 +143,25 @@ export function evaluateBotTelemetry(
     score += 100;
   }
 
-  // 2. Check navigator.webdriver
+  if (telemetry.aiTrapTriggered === true) {
+    reasons.push("AI-Agent Accessibility-Tree prompt-injection trap triggered (_shield_ai_trap)");
+    score += 100;
+  }
+
+  // 2. Check @fingerprintjs/botd and navigator.webdriver
+  if (telemetry.botdDetected === true) {
+    reasons.push(`FingerprintJS BotD flagged automated browser (${telemetry.botdKind || "automation"})`);
+    score += 100;
+  }
+
   if (telemetry.webdriver === true) {
     reasons.push("navigator.webdriver flag is active (Headless Browser detected)");
     score += 100;
+  }
+
+  if (typeof telemetry.untrustedEventsCount === "number" && telemetry.untrustedEventsCount > 0) {
+    reasons.push(`Synthetic untrusted DOM events detected (${telemetry.untrustedEventsCount} events)`);
+    score += 90;
   }
 
   // 3. Fast completion check
@@ -165,6 +185,9 @@ export function evaluateBotTelemetry(
       reasons.push("No physical interaction events detected (zero mouse/touch/keystrokes)");
       // Missing interaction can be caused by accessibility tools or password managers.
       score += 20;
+    } else if (!honeypotFieldVal && (token === "" || token === undefined)) {
+      reasons.push("Missing client telemetry token (cookieless / raw HTTP bot request)");
+      score += 80;
     }
   } else if (keyCount > 8 && variance < 2) {
     reasons.push("Synthetic robotic typing cadence (flight variance < 2ms)");

@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, integer, timestamp, jsonb, uniqueIndex, primaryKey } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, timestamp, jsonb, doublePrecision, uniqueIndex, primaryKey } from "drizzle-orm/pg-core";
 
 export const tenants = pgTable("tenants", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -27,8 +27,35 @@ export const submissions = pgTable("submissions", {
   triggeredShieldIds: jsonb("triggered_shield_ids").$type<string[]>().default([]).notNull(),
   deepResearchExplanation: text("deep_research_explanation"), // Generated only by a successfully grounded research model
   researchEvidence: jsonb("research_evidence").$type<Record<string, unknown>>(),
+  originCountryCode: text("origin_country_code"),
+  originCountry: text("origin_country"),
+  originRegion: text("origin_region"),
+  originCity: text("origin_city"),
+  originLat: doublePrecision("origin_lat"),
+  originLng: doublePrecision("origin_lng"),
+  originNetwork: text("origin_network"),
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  authorHandle: text("author_handle"),
+  accountCreatedAt: timestamp("account_created_at"),
+  replyToCommentId: integer("reply_to_comment_id"),
+  sharedUrl: text("shared_url"),
+  deviceFingerprint: text("device_fingerprint"),
+  telemetrySummary: jsonb("telemetry_summary").$type<Record<string, unknown>>(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [uniqueIndex("submissions_tenant_comment_idx").on(table.tenantId, table.wpCommentId)]);
+
+export const trafficLogs = pgTable("traffic_logs", {
+  tenantId: text("tenant_id").primaryKey(),
+  rawLogs: text("raw_logs").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const socialDatasets = pgTable("social_datasets", {
+  tenantId: text("tenant_id").primaryKey(),
+  itemsJson: jsonb("items_json").$type<Array<Record<string, unknown>>>().default([]).notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
 
 export const honeypotVault = pgTable("honeypot_vault", {
   id: uuid("id").defaultRandom().primaryKey(),

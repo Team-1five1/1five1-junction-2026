@@ -8,7 +8,14 @@ import { screenWithJev } from "../ai/jev-screener";
 import { evaluateSemEvalBitmask, type ThresholdMode } from "../engines/semeval-scorer";
 import { verifyStanceOrForensic, investigateReviewBombing } from "../ai/grounded-research";
 import { detectReviewSpike } from "../engines/review-velocity";
+import { computeLocalEmbedding, toPgVectorLiteral } from "../ai/embeddings";
+import { resolveOriginGeo, type OriginGeoInfo } from "../engines/geo-intel";
 import type { BotEvaluationResult } from "../engines/bot-telemetry";
+import {
+  recordHoneypotSubmission,
+  lookupHoneypotCluster,
+  resetHoneypotClusters,
+} from "../engines/honeypot-cluster";
 import { honeypotPatternId } from "../engines/honeypot-patterns";
 import { debugLog, debugDecision } from "../config/logger";
 import { researchModel } from "../ai/web-grounding";
@@ -16,9 +23,112 @@ import type { ForensicResult } from "../ai/grounded-research";
 import { ProviderHttpError } from "../ai/provider-errors";
 import { retryDelay, MAX_JOB_FAILURES } from "./retry-policy";
 
+export interface InMemorySubmissionRecord {
+  id: string;
+  wpCommentId: number;
+  entityId: string;
+  authorSessionHash: string;
+  authorHandle?: string | null;
+  accountCreatedAt?: Date | string | null;
+  replyToCommentId?: number | null;
+  sharedUrl?: string | null;
+  deviceFingerprint?: string | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+  telemetrySummary?: Record<string, any> | null;
+  rawText: string;
+  rating: number | null;
+  authorType: "human" | "bot";
+  visibility: "pending" | "public" | "public_flagged" | "shadowbanned";
+  routingPath: string;
+  modelUsed: string;
+  riskScore: number;
+  shieldFlags: number;
+  failedRiskIds: string[];
+  triggeredShieldIds: string[];
+  deepResearchExplanation: string | null;
+  origin?: OriginGeoInfo;
+  createdAt: Date;
+  embedding: number[];
+}
+
+export interface InMemoryHoneypotRecord {
+  id: string;
+  submissionId: string;
+  ipAddress: string;
+  userAgent: string;
+  telemetryJson: Record<string, any>;
+  patternClusterId: string | null;
+  createdAt: Date;
+}
+
+export const inMemoryBanners = new Map<string, { entityId: string; anomalyStatus: string; bannerExplanation: string | null }>();
+export const inMemorySubmissions: InMemorySubmissionRecord[] = [];
+export const inMemoryHoneypot = new Map<string, InMemoryHoneypotRecord>();
+export const inMemoryReviewTracker = new Map<string, Array<{ rating: number; text: string; createdAt: Date }>>();
+
+export interface HoneypotVaultRecord {
+  id: string;
+  wpCommentId: number;
+  entityId: string;
+  authorSessionHash: string;
+  rawText: string;
+  ipAddress: string;
+  userAgent: string;
+  routingPath: "BOT_HONEYPOT" | "STAGE_1B_HONEYPOT_CLUSTER";
+  patternClusterId: string;
+  similarity?: number;
+  confidenceScore: number;
+  reasons: string[];
+  telemetry: Record<string, any>;
+  createdAt: string;
+}
+export const inMemoryHoneypotVault: HoneypotVaultRecord[] = [];
+
+export let activeThresholdMode: ThresholdMode = "balanced";
+export function setActiveThresholdMode(mode: ThresholdMode) {
+  activeThresholdMode = mode;
+}
+
+export function resetInMemoryState(): void {
+  inMemoryBanners.clear();
+  inMemorySubmissions.length = 0;
+  inMemoryHoneypot.clear();
+  inMemoryReviewTracker.clear();
+  inMemoryHoneypotVault.length = 0;
+  resetHoneypotClusters();
+}
+
+let originColsChecked = false;
+async function ensureOriginColumnsOnce(): Promise<void> {
+  if (originColsChecked) return;
+  originColsChecked = true;
+  try {
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_country_code text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_country text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_region text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_city text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_lat double precision`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_lng double precision`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS origin_network text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS ip_address text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS user_agent text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS author_handle text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS account_created_at timestamp`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS reply_to_comment_id integer`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS shared_url text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS device_fingerprint text`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS telemetry_summary jsonb`;
+  } catch {
+    // Postgres might be unreachable in unit tests / offline mode
+  }
+}
+
 export interface EvaluationJobData {
   tenantId: string; wpCommentId: number; entityId: string; entityTitle?: string;
   authorSessionHash: string; rawText: string; rating?: number | null;
+  authorHandle?: string | null; accountCreatedAt?: string | null;
+  replyToCommentId?: number | null; sharedUrl?: string | null; deviceFingerprint?: string | null;
   botResult: BotEvaluationResult; ipAddress: string; userAgent: string;
   thresholdMode: ThresholdMode;
 }
@@ -94,32 +204,372 @@ export async function analyzeText(text: string, mode: ThresholdMode) {
   return { ...scored, route, escalateToResearch, visibility, modelUsed, deepResearchExplanation: explanation, researchEvidence };
 }
 
+function extractSubmissionMeta(data: EvaluationJobData) {
+  const accountCreatedDate = data.accountCreatedAt ? new Date(data.accountCreatedAt) : null;
+  const validAccountCreatedAt =
+    accountCreatedDate && !Number.isNaN(accountCreatedDate.getTime()) ? accountCreatedDate : null;
+  return {
+    ipAddress: data.ipAddress,
+    userAgent: data.userAgent,
+    authorHandle: data.authorHandle ?? null,
+    accountCreatedAt: validAccountCreatedAt,
+    replyToCommentId: data.replyToCommentId ?? null,
+    sharedUrl: data.sharedUrl ?? null,
+    deviceFingerprint: data.deviceFingerprint ?? null,
+    telemetrySummary: data.botResult?.telemetry ?? null,
+  };
+}
+
 export async function processEvaluationJob(data: EvaluationJobData) {
   const { tenantId, wpCommentId, entityId, rawText, authorSessionHash, rating, botResult } = data;
-  const analysis = botResult.isBot ? null : await analyzeText(rawText, data.thresholdMode);
+
+  // 1A. Direct Bot Detection (Honeypot DOM Trap or Bot Telemetry)
+  if (botResult.isBot) {
+    const clusterInfo = recordHoneypotSubmission(rawText, authorSessionHash, botResult.reasons);
+    const patternClusterId = clusterInfo.clusterId || honeypotPatternId(rawText);
+
+    let subId = crypto.randomUUID();
+    inMemoryHoneypotVault.unshift({
+      id: subId,
+      wpCommentId,
+      entityId,
+      authorSessionHash,
+      rawText,
+      ipAddress: data.ipAddress,
+      userAgent: data.userAgent,
+      routingPath: "BOT_HONEYPOT",
+      patternClusterId,
+      confidenceScore: botResult.confidenceScore,
+      reasons: botResult.reasons,
+      telemetry: botResult.telemetry,
+      createdAt: new Date().toISOString(),
+    });
+    if (inMemoryHoneypotVault.length > 500) inMemoryHoneypotVault.pop();
+
+    const result = {
+      wpCommentId,
+      entityId,
+      visibility: "shadowbanned" as const,
+      authorType: "bot" as const,
+      modelUsed: "none",
+      riskScore: 100,
+      shieldFlags: 0,
+      routingPath: "BOT_HONEYPOT",
+      stage: "STAGE_1B_HONEYPOT",
+      patternClusterId,
+      reasons: botResult.reasons,
+      failedRiskIds: [] as string[],
+      triggeredShieldIds: [] as string[],
+      deepResearchExplanation: null as string | null,
+      researchEvidence: null as any,
+      banner: null as Record<string, any> | null,
+      hasBanner: false,
+    };
+
+    try {
+      await ensureOriginColumnsOnce();
+      const origin = resolveOriginGeo({
+        ipAddress: data.ipAddress,
+        authorSessionHash,
+        wpCommentId,
+        authorType: "bot",
+        countryHeader: (data as any).countryHeader || null,
+      });
+      const embedding = computeLocalEmbedding(rawText, []);
+      let savedId: string | null = null;
+      const meta = extractSubmissionMeta(data);
+      await db.transaction(async tx => {
+        const [saved] = await tx.insert(submissions).values({
+          wpCommentId,
+          entityId,
+          tenantId,
+          authorSessionHash,
+          rawText,
+          rating: rating ?? null,
+          authorType: "bot",
+          visibility: "shadowbanned",
+          routingPath: "BOT_HONEYPOT",
+          modelUsed: "none",
+          riskScore: 100,
+          shieldFlags: 0,
+          failedRiskIds: [],
+          triggeredShieldIds: [],
+          deepResearchExplanation: null,
+          originCountryCode: origin.countryCode,
+          originCountry: origin.countryName,
+          originRegion: origin.region,
+          originCity: origin.city,
+          originLat: origin.lat,
+          originLng: origin.lng,
+          originNetwork: origin.networkType,
+          ...meta,
+        }).onConflictDoNothing({ target: [submissions.tenantId, submissions.wpCommentId] }).returning();
+        if (saved) {
+          savedId = saved.id;
+          await tx.insert(honeypotVault).values({
+            submissionId: saved.id,
+            ipAddress: data.ipAddress,
+            userAgent: data.userAgent,
+            telemetryJson: { ...botResult.telemetry, reasons: botResult.reasons, confidenceScore: botResult.confidenceScore },
+            patternClusterId,
+          });
+        }
+      });
+      if (savedId) {
+        subId = savedId;
+        const now = new Date();
+        inMemorySubmissions.unshift({
+          id: savedId,
+          wpCommentId,
+          entityId,
+          authorSessionHash,
+          ...meta,
+          rawText,
+          rating: rating ?? null,
+          authorType: "bot",
+          visibility: "shadowbanned",
+          routingPath: "BOT_HONEYPOT",
+          modelUsed: "none",
+          riskScore: 100,
+          shieldFlags: 0,
+          failedRiskIds: [],
+          triggeredShieldIds: [],
+          deepResearchExplanation: null,
+          origin,
+          createdAt: now,
+          embedding,
+        });
+        inMemoryHoneypot.set(savedId, {
+          id: crypto.randomUUID(),
+          submissionId: savedId,
+          ipAddress: data.ipAddress,
+          userAgent: data.userAgent,
+          telemetryJson: { ...botResult.telemetry, reasons: botResult.reasons, confidenceScore: botResult.confidenceScore },
+          patternClusterId,
+          createdAt: now,
+        });
+      }
+    } catch (e: any) {
+      debugLog("Worker", `DB insert skipped/failed for bot: ${e.message}`);
+    }
+
+    return result;
+  }
+
+  // 1B. Stage 1B Honeypot Vector Lookup (Stealth Bots & Same-Hour Paraphrased Propaganda Waves)
+  const clusterMatch = lookupHoneypotCluster(rawText, authorSessionHash);
+  if (clusterMatch.matched && clusterMatch.clusterId) {
+    let subId = crypto.randomUUID();
+    inMemoryHoneypotVault.unshift({
+      id: subId,
+      wpCommentId,
+      entityId,
+      authorSessionHash,
+      rawText,
+      ipAddress: data.ipAddress,
+      userAgent: data.userAgent,
+      routingPath: "STAGE_1B_HONEYPOT_CLUSTER",
+      patternClusterId: clusterMatch.clusterId,
+      similarity: clusterMatch.similarity,
+      confidenceScore: Math.round(clusterMatch.similarity * 100),
+      reasons: clusterMatch.reasons,
+      telemetry: botResult.telemetry,
+      createdAt: new Date().toISOString(),
+    });
+    if (inMemoryHoneypotVault.length > 500) inMemoryHoneypotVault.pop();
+
+    const result = {
+      wpCommentId,
+      entityId,
+      visibility: "shadowbanned" as const,
+      authorType: "bot" as const,
+      routingPath: "STAGE_1B_HONEYPOT_CLUSTER",
+      stage: "STAGE_1B_HONEYPOT_VECTOR",
+      patternClusterId: clusterMatch.clusterId,
+      similarity: clusterMatch.similarity,
+      reasons: clusterMatch.reasons,
+      modelUsed: "none",
+      riskScore: 95,
+      shieldFlags: 0,
+      failedRiskIds: [] as string[],
+      triggeredShieldIds: [] as string[],
+      deepResearchExplanation: null as string | null,
+      researchEvidence: null as any,
+      banner: null as Record<string, any> | null,
+      hasBanner: false,
+    };
+
+    try {
+      await ensureOriginColumnsOnce();
+      const origin = resolveOriginGeo({
+        ipAddress: data.ipAddress,
+        authorSessionHash,
+        wpCommentId,
+        authorType: "bot",
+        countryHeader: (data as any).countryHeader || null,
+      });
+      const embedding = computeLocalEmbedding(rawText, []);
+      const meta = extractSubmissionMeta(data);
+      let savedId: string | null = null;
+      await db.transaction(async tx => {
+        const [saved] = await tx.insert(submissions).values({
+          wpCommentId,
+          entityId,
+          tenantId,
+          authorSessionHash,
+          rawText,
+          rating: rating ?? null,
+          authorType: "bot",
+          visibility: "shadowbanned",
+          routingPath: "STAGE_1B_HONEYPOT_CLUSTER",
+          modelUsed: "none",
+          riskScore: 95,
+          shieldFlags: 0,
+          failedRiskIds: [],
+          triggeredShieldIds: [],
+          deepResearchExplanation: null,
+          originCountryCode: origin.countryCode,
+          originCountry: origin.countryName,
+          originRegion: origin.region,
+          originCity: origin.city,
+          originLat: origin.lat,
+          originLng: origin.lng,
+          originNetwork: origin.networkType,
+          ...meta,
+        }).onConflictDoNothing({ target: [submissions.tenantId, submissions.wpCommentId] }).returning();
+        if (saved) {
+          savedId = saved.id;
+          await tx.insert(honeypotVault).values({
+            submissionId: saved.id,
+            ipAddress: data.ipAddress,
+            userAgent: data.userAgent,
+            telemetryJson: {
+              ...botResult.telemetry,
+              similarity: clusterMatch.similarity,
+              matchType: clusterMatch.matchType,
+              reasons: clusterMatch.reasons,
+            },
+            patternClusterId: clusterMatch.clusterId,
+          });
+        }
+      });
+      if (savedId) {
+        subId = savedId;
+        const now = new Date();
+        inMemorySubmissions.unshift({
+          id: savedId,
+          wpCommentId,
+          entityId,
+          authorSessionHash,
+          ...meta,
+          rawText,
+          rating: rating ?? null,
+          authorType: "bot",
+          visibility: "shadowbanned",
+          routingPath: "STAGE_1B_HONEYPOT_CLUSTER",
+          modelUsed: "none",
+          riskScore: 95,
+          shieldFlags: 0,
+          failedRiskIds: [],
+          triggeredShieldIds: [],
+          deepResearchExplanation: null,
+          origin,
+          createdAt: now,
+          embedding,
+        });
+      }
+    } catch (e: any) {
+      debugLog("Worker", `DB insert skipped/failed for stealth bot: ${e.message}`);
+    }
+
+    return result;
+  }
+
+  // 2. Human Comment Path
+  const analysis = await analyzeText(rawText, data.thresholdMode);
   const result = {
-    wpCommentId, entityId, visibility: analysis?.visibility || "shadowbanned",
-    authorType: botResult.isBot ? "bot" : "human", modelUsed: analysis?.modelUsed || "none",
-    riskScore: analysis?.riskScore ?? 100, shieldFlags: analysis?.shieldFlags ?? 0,
-    routingPath: analysis?.route || "BOT_HONEYPOT",
-    failedRiskIds: analysis?.failedRiskIds || [], triggeredShieldIds: analysis?.triggeredShieldIds || [],
-    deepResearchExplanation: analysis?.deepResearchExplanation ?? null,
-    researchEvidence: analysis?.researchEvidence ?? null,
+    wpCommentId,
+    entityId,
+    visibility: analysis.visibility,
+    authorType: "human" as const,
+    modelUsed: analysis.modelUsed,
+    riskScore: analysis.riskScore,
+    shieldFlags: analysis.shieldFlags,
+    routingPath: analysis.route,
+    failedRiskIds: analysis.failedRiskIds,
+    triggeredShieldIds: analysis.triggeredShieldIds,
+    deepResearchExplanation: analysis.deepResearchExplanation,
+    researchEvidence: analysis.researchEvidence,
     banner: null as Record<string, any> | null,
   };
-  // Persist both the submission and vault atomically; retries never duplicate submissions.
-  await db.transaction(async tx => {
-    const [saved] = await tx.insert(submissions).values({
-      ...result, tenantId, rawText, authorSessionHash, rating: rating ?? null,
-    }).onConflictDoNothing({ target: [submissions.tenantId, submissions.wpCommentId] }).returning();
-    if (saved && botResult.isBot) await tx.insert(honeypotVault).values({
-      submissionId: saved.id, ipAddress: data.ipAddress, userAgent: data.userAgent,
-      telemetryJson: { ...botResult.telemetry, reasons: botResult.reasons, confidenceScore: botResult.confidenceScore },
-      patternClusterId: honeypotPatternId(rawText),
-    });
+
+  const origin = resolveOriginGeo({
+    ipAddress: data.ipAddress,
+    authorSessionHash,
+    wpCommentId,
+    authorType: "human",
+    countryHeader: (data as any).countryHeader || null,
   });
-  // An individual rhetoric flag is not evidence of an entity-wide coordinated attack.
-  // A separate durable job grounds review anomalies, so it cannot delay comment publication.
+  const embedding = computeLocalEmbedding(rawText, [
+    ...result.failedRiskIds,
+    ...result.triggeredShieldIds,
+  ]);
+  const patternClusterId = honeypotPatternId(rawText);
+
+  try {
+    await ensureOriginColumnsOnce();
+    const meta = extractSubmissionMeta(data);
+    let savedId: string | null = null;
+    await db.transaction(async tx => {
+      const [saved] = await tx.insert(submissions).values({
+        ...result,
+        tenantId,
+        rawText,
+        authorSessionHash,
+        rating: rating ?? null,
+        originCountryCode: origin.countryCode,
+        originCountry: origin.countryName,
+        originRegion: origin.region,
+        originCity: origin.city,
+        originLat: origin.lat,
+        originLng: origin.lng,
+        originNetwork: origin.networkType,
+        ...meta,
+      }).onConflictDoNothing({ target: [submissions.tenantId, submissions.wpCommentId] }).returning();
+      if (saved) savedId = saved.id;
+    });
+    if (savedId) {
+      try {
+        const vecLit = toPgVectorLiteral(embedding);
+        await sql`UPDATE submissions SET embedding = ${vecLit}::vector WHERE id = ${savedId}`;
+      } catch {}
+      const now = new Date();
+      inMemorySubmissions.unshift({
+        id: savedId,
+        wpCommentId,
+        entityId,
+        authorSessionHash,
+        ...meta,
+        rawText,
+        rating: rating ?? null,
+        authorType: "human",
+        visibility: result.visibility,
+        routingPath: result.routingPath,
+        modelUsed: result.modelUsed,
+        riskScore: result.riskScore,
+        shieldFlags: result.shieldFlags,
+        failedRiskIds: result.failedRiskIds,
+        triggeredShieldIds: result.triggeredShieldIds,
+        deepResearchExplanation: result.deepResearchExplanation,
+        origin,
+        createdAt: now,
+        embedding,
+      });
+    }
+  } catch (e: any) {
+    debugLog("Worker", `DB insert skipped/failed for human submission: ${e.message}`);
+  }
+
   return result;
 }
 
@@ -142,6 +592,12 @@ async function investigateEntity(data: EvaluationJobData) {
   }
   const investigation = await investigateReviewBombing(data.entityId, data.entityTitle || data.entityId, velocity.negatives);
   const banner = { anomalyStatus: investigation.anomalyStatus, bannerExplanation: investigation.bannerExplanation, sources: investigation.sources };
+  inMemoryBanners.set(data.entityId, {
+    entityId: data.entityId,
+    anomalyStatus: banner.anomalyStatus,
+    bannerExplanation: banner.bannerExplanation,
+  });
+
   await db.insert(entityBanners).values({ tenantId: data.tenantId, entityId: data.entityId, ...banner }).onConflictDoUpdate({
     target: [entityBanners.tenantId, entityBanners.entityId], set: { ...banner, updatedAt: new Date() },
   });
