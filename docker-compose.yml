@@ -1,7 +1,7 @@
 services:
   bun-app:
-    profiles: [backend]
     build: .
+    container_name: bun-app
     restart: unless-stopped
     env_file: .env
     environment:
@@ -9,14 +9,24 @@ services:
       PORT: 4000
       DATABASE_URL: postgres://shield:shield_local_password@postgres:5432/shield_db
       REDIS_URL: redis://redis:6379
-      WP_DEFAULT_WEBHOOK_URL: http://wordpress/wp-json/shield/v1/webhook
+      WP_DEFAULT_WEBHOOK_URL: https://verius.tech/wp-json/shield/v1/webhook
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "127.0.0.1:4000:4000"
     volumes:
       - ./keys:/app/keys
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=app-net"
+      - "traefik.http.routers.dashboard.rule=Host(`dashboard.verius.tech`) || Host(`www.dashboard.verius.tech`)"
+      - "traefik.http.routers.dashboard.entrypoints=websecure"
+      - "traefik.http.routers.dashboard.tls=true"
+      - "traefik.http.routers.dashboard.tls.certresolver=letsencrypt"
+      - "traefik.http.services.dashboard.loadbalancer.server.port=4000"
     networks:
       - app-net
     healthcheck:
@@ -34,9 +44,14 @@ services:
       POSTGRES_PASSWORD: shield_local_password
       POSTGRES_DB: shield_db
     ports:
-      - "127.0.0.1:5433:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shield -d shield_db"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
     networks:
       - app-net
 
@@ -45,9 +60,14 @@ services:
     container_name: shield_redis
     restart: unless-stopped
     ports:
-      - "127.0.0.1:6380:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
     networks:
       - app-net
 
@@ -62,6 +82,11 @@ services:
       MYSQL_PASSWORD: wp_user_password_2026
     volumes:
       - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
     networks:
       - app-net
 
@@ -70,24 +95,44 @@ services:
     container_name: wordpress-app
     restart: unless-stopped
     depends_on:
-      - wordpress-db
+      wordpress-db:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
     environment:
       WORDPRESS_DB_HOST: wordpress-db:3306
       WORDPRESS_DB_USER: wordpress
       WORDPRESS_DB_PASSWORD: wp_user_password_2026
       WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_CONFIG_EXTRA: |
+        if (isset($$_SERVER['HTTP_X_FORWARDED_PROTO']) && strpos($$_SERVER['HTTP_X_FORWARDED_PROTO'], 'https') !== false) {
+            $$_SERVER['HTTPS'] = 'on';
+        }
+        if (isset($$_SERVER['HTTP_X_FORWARDED_FOR'])) {
+            $$list = explode(',', $$_SERVER['HTTP_X_FORWARDED_FOR']);
+            $$_SERVER['REMOTE_ADDR'] = trim($$list[0]);
+        }
+        define('WP_HOME', 'https://verius.tech');
+        define('WP_SITEURL', 'https://verius.tech');
     volumes:
       - wp_data:/var/www/html
       - ./wp-content/plugins/shield-guard:/var/www/html/wp-content/plugins/shield-guard
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=app-net"
+      - "traefik.http.routers.wordpress.rule=Host(`verius.tech`) || Host(`www.verius.tech`)"
+      - "traefik.http.routers.wordpress.entrypoints=websecure"
+      - "traefik.http.routers.wordpress.tls=true"
+      - "traefik.http.routers.wordpress.tls.certresolver=letsencrypt"
+      - "traefik.http.services.wordpress.loadbalancer.server.port=80"
     networks:
       - app-net
 
 networks:
   app-net:
+    name: app-net
     driver: bridge
 
 volumes:

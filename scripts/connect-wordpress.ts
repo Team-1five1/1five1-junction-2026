@@ -1,21 +1,23 @@
-/** Provision the local Docker WordPress installation, ensuring it is installed, active, and synced to Postgres. */
+/** Provision the local/production Docker WordPress installation, ensuring it is installed, active, and synced to Postgres. */
 import { db, sql } from "../src/db";
 import { tenants } from "../src/db/schema";
 import { generateKeyPairSync } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 
+const defaultApiUrl = process.env.API_URL || (process.env.NODE_ENV === "production" ? "https://dashboard.verius.tech" : "http://host.docker.internal:4000");
+
 const php = `require '/var/www/html/wp-load.php';
 if (!is_blog_installed()) {
   require_once '/var/www/html/wp-admin/includes/upgrade.php';
-  wp_install('Verius Dev Site', 'admin', 'admin@example.org', true, '', 'admin_password_2026');
+  wp_install('Verius', 'admin', 'admin@verius.tech', true, '', 'admin_password_2026');
 }
 require_once '/var/www/html/wp-admin/includes/plugin.php';
 if (!is_plugin_active('shield-guard/shield-guard.php')) {
   activate_plugin('shield-guard/shield-guard.php');
 }
 $options = get_option('shield_guard_settings', array());
-if (empty($options['api_url']) || $options['api_url'] === 'http://127.0.0.1:4000' || $options['api_url'] === 'http://localhost:4000') {
-  $options['api_url'] = 'http://host.docker.internal:4000';
+if (empty($options['api_url']) || $options['api_url'] === 'http://127.0.0.1:4000' || $options['api_url'] === 'http://localhost:4000' || $options['api_url'] === 'http://host.docker.internal:4000') {
+  $options['api_url'] = '${defaultApiUrl}';
 }
 if (empty($options['api_key']) || $options['api_key'] === 'default_tenant') {
   $options['api_key'] = 'tenant_' . wp_generate_password(40, false);
@@ -69,8 +71,8 @@ if (!existsSync(path)) {
   writeFileSync(path, privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
 }
 
-console.log(`✓ Local WordPress connected and provisioned:
-  - Site URL:        http://localhost:8080 (admin / admin_password_2026)
+console.log(`✓ WordPress connected and provisioned:
+  - Site URL:        ${tenantData.wpWebhookUrl.replace(/\/wp-json.*/, '')} (admin / admin_password_2026)
   - Backend URL:     ${tenantData.apiUrl}
   - Tenant API Key:  ${tenant.apiKey}
   - Webhook URL:     ${tenant.wpWebhookUrl}
