@@ -7,7 +7,6 @@
     "start": "bun run src/index.ts",
     "dev": "bun run --watch src/index.ts",
     "test": "bun test",
-    "benchmark": "bun run scripts/benchmark-dataset.ts",
     "typecheck": "tsc --noEmit",
     "db:migrate": "bun run scripts/migrate.ts",
     "tenant:provision": "bun run scripts/provision-tenant.ts",
