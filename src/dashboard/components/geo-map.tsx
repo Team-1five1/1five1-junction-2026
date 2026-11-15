@@ -410,7 +410,7 @@ export function GlobalOriginMap({
     return {
       title: "Global Overview",
       description:
-        "Interactive political world map backed by Leaflet & free OpenStreetMap tiles. Scroll or use + / - to zoom down to cities, drag to pan, and click any country or hotspot to filter.",
+        "",
       totalCount: totalAnalyzed,
       propagandaCount: totalProp,
       botCount: totalBots,

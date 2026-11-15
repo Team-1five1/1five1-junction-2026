@@ -532,7 +532,7 @@ export function DashboardApp() {
             <div>
               <div className="flex items-center gap-2.5">
                 <h1 className="text-sm sm:text-base font-semibold tracking-tight">
-                  Truthier Command Center
+                  Truthier Dashboard
                 </h1>
                 <HoverExplanation
                   title={
@@ -559,9 +559,6 @@ export function DashboardApp() {
                   </Badge>
                 </HoverExplanation>
               </div>
-              <p className="text-xs text-muted-foreground">
-                Read-Only Website Protection Monitor &bull; Hover any tag or card for 2s to learn what it means
-              </p>
             </div>
           </div>
 
@@ -614,77 +611,6 @@ export function DashboardApp() {
       </header>
 
       <main className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6">
-        {/* Active Entity Banners using shadcn/ui Alert */}
-        {overview?.entityBanners && overview.entityBanners.length > 0 && (
-          <div className="grid gap-3 md:grid-cols-2">
-            {overview.entityBanners.map((banner: any) => {
-              const isAttack = banner.anomalyStatus === "coordinated_attack";
-              const entityInfo = getTagExplanation(banner.entityId);
-              const statusInfo = getTagExplanation(banner.anomalyStatus);
-
-              return (
-                <Alert
-                  key={banner.entityId}
-                  variant={isAttack ? "warning" : "info"}
-                  className="flex items-start justify-between gap-4"
-                >
-                  <div className="space-y-1">
-                    <AlertTitle>
-                      <HoverExplanation
-                        title={
-                          isAttack
-                            ? "Coordinated Attack Shield"
-                            : "Genuine Customer Feedback Spike"
-                        }
-                        category="Website Page Notice"
-                        rawKey={banner.anomalyStatus}
-                        description={
-                          isAttack
-                            ? "An automated wave of bots or coordinated framing targeted this page. Protective notices are shown to visitors."
-                            : "Many real customers left low ratings about a known bug or order issue. Authentic complaints remain visible."
-                        }
-                      >
-                        <Badge variant={isAttack ? "warning" : "info"} className="cursor-default">
-                          {isAttack ? "Coordinated Attack Notice" : "Genuine Feedback Spike"}
-                        </Badge>
-                      </HoverExplanation>
-
-                      <HoverExplanation
-                        title={entityInfo.title}
-                        category={entityInfo.category}
-                        rawKey={entityInfo.rawKey}
-                        description={entityInfo.description}
-                      >
-                        <span className="text-xs font-semibold text-foreground cursor-default">
-                          {entityInfo.title}
-                        </span>
-                      </HoverExplanation>
-                    </AlertTitle>
-                    <AlertDescription>{banner.bannerExplanation}</AlertDescription>
-                  </div>
-
-                  <HoverExplanation
-                    title="Filter by This Page"
-                    category="Quick Filter"
-                    rawKey={banner.entityId}
-                    description={`Opens Smart Search filtered only to comments submitted on "${entityInfo.title}".`}
-                  >
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        setSelectedTags([banner.entityId]);
-                        setActiveTab("search");
-                      }}
-                    >
-                      View Comments
-                    </Button>
-                  </HoverExplanation>
-                </Alert>
-              );
-            })}
-          </div>
-        )}
 
         {/* 4 shadcn/ui Summary Cards */}
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -693,7 +619,7 @@ export function DashboardApp() {
             category="Overview Metric"
             rawKey="submissions"
             description="Every comment and product review captured from your WordPress site and stored in the PostgreSQL submissions table."
-            className="block h-full"
+            className="force-block h-full"
           >
             <Card className="h-full">
               <CardHeader className="pb-2">
@@ -701,7 +627,6 @@ export function DashboardApp() {
                   <CardDescription className="font-medium uppercase tracking-wider">
                     Total Comments
                   </CardDescription>
-                  <Badge variant="secondary">{rangeLabel}</Badge>
                 </div>
                 <CardTitle className="text-2xl sm:text-3xl font-semibold font-mono tabular-nums text-foreground">
                   {kpis.totalSubmissions}
@@ -724,7 +649,7 @@ export function DashboardApp() {
             category="Bot Defense Metric"
             rawKey="author_type = 'bot'"
             description="Automated spam scripts and headless browsers caught in under 2 milliseconds by hidden traps and browser checks. They are silently hidden from visitors."
-            className="block h-full"
+            className="force-block h-full"
           >
             <Card className="h-full">
               <CardHeader className="pb-2">
@@ -732,7 +657,6 @@ export function DashboardApp() {
                   <CardDescription className="font-medium uppercase tracking-wider">
                     Blocked Bots
                   </CardDescription>
-                  <Badge variant="outline">Instant Trap</Badge>
                 </div>
                 <CardTitle className="text-2xl sm:text-3xl font-semibold font-mono tabular-nums text-foreground">
                   {kpis.botsDetected}
@@ -752,7 +676,7 @@ export function DashboardApp() {
             category="Propaganda Defense Metric"
             rawKey="visibility = 'public_flagged'"
             description="Human-written comments that triggered severe manipulation patterns and were confirmed by Stage 2 AI forensic review."
-            className="block h-full"
+            className="force-block h-full"
           >
             <Card className="h-full">
               <CardHeader className="pb-2">
@@ -760,7 +684,6 @@ export function DashboardApp() {
                   <CardDescription className="font-medium uppercase tracking-wider">
                     Flagged Manipulation
                   </CardDescription>
-                  <Badge variant="warning">AI Forensic</Badge>
                 </div>
                 <CardTitle className="text-2xl sm:text-3xl font-semibold font-mono tabular-nums text-amber-600 dark:text-amber-300">
                   {kpis.flaggedPropaganda}
@@ -782,7 +705,7 @@ export function DashboardApp() {
             category="Anti-Censorship Metric"
             rawKey="ROUTE_2_SHIELDED_VENTING"
             description="Angry or frustrated customer reviews about shipping delays, bugs, or refunds that were protected from false propaganda flags."
-            className="block h-full"
+            className="force-block h-full"
           >
             <Card className="h-full">
               <CardHeader className="pb-2">
@@ -790,7 +713,6 @@ export function DashboardApp() {
                   <CardDescription className="font-medium uppercase tracking-wider">
                     Protected Complaints
                   </CardDescription>
-                  <Badge variant="info">Context Shield</Badge>
                 </div>
                 <CardTitle className="text-2xl sm:text-3xl font-semibold font-mono tabular-nums text-sky-600 dark:text-sky-300">
                   {kpis.shieldedVenting}
